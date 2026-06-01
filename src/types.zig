@@ -7,6 +7,7 @@ pub const SourceType = enum {
     git,
     github,
     registry,
+    npm,
 
     pub fn fromString(s: []const u8) !SourceType {
         return std.meta.stringToEnum(SourceType, s) orelse error.UnknownSourceType;

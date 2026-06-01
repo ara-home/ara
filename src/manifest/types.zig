@@ -8,7 +8,6 @@ pub const Project = struct {
     license: ?[]const u8 = null,
     repository: ?[]const u8 = null,
     homepage: ?[]const u8 = null,
-    authors: ?[]const []const u8 = null,
 };
 
 pub const DependencyEntry = struct {
@@ -20,6 +19,16 @@ pub const DependencyEntry = struct {
     commit: ?[]const u8 = null,
     path: ?[]const u8 = null,
     package: ?[]const u8 = null,
+};
+
+pub const Workspace = struct {
+    members: []const []const u8,
+};
+
+pub const ScriptEntry = struct { name: []const u8, command: []const u8 };
+
+pub const Scripts = struct {
+    entries: []const ScriptEntry,
 };
 
 pub const Security = struct {
@@ -35,14 +44,20 @@ pub const Build = struct {
 };
 
 pub const Manifest = struct {
-    project: ?Project = null,
-    deps: ?[]DependencyEntry = null,
+    project: Project = .{ .name = "", .version = "" },
+    deps: []DependencyEntry = &.{},
     workspace: ?Workspace = null,
-    scripts: ?std.StringHashMap([]const u8) = null,
+    scripts: ?Scripts = null,
     security: ?Security = null,
     build: ?Build = null,
-};
 
-pub const Workspace = struct {
-    members: []const []const u8,
+    pub fn deinit(self: *Manifest, allocator: std.mem.Allocator) void {
+        if (self.deps.len > 0) allocator.free(std.mem.sliceAsBytes(self.deps));
+        if (self.workspace) |*ws| {
+            if (ws.members.len > 0) allocator.free(std.mem.sliceAsBytes(ws.members));
+        }
+        if (self.scripts) |*s| {
+            if (s.entries.len > 0) allocator.free(std.mem.sliceAsBytes(s.entries));
+        }
+    }
 };
