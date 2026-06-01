@@ -2,10 +2,16 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+pub const InlineEntry = struct {
+    key: []const u8,
+    value: Value,
+};
+
 pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
     boolean: bool,
+    inline_table: []const InlineEntry,
 
     pub fn asString(self: Value) ?[]const u8 {
         return switch (self) {
@@ -27,11 +33,41 @@ pub const Value = union(enum) {
             else => null,
         };
     }
+
+    pub fn getInline(self: Value, key: []const u8) ?Value {
+        switch (self) {
+            .inline_table => |entries| {
+                for (entries) |e| {
+                    if (std.mem.eql(u8, e.key, key)) return e.value;
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    pub fn deinit(self: *Value, allocator: Allocator) void {
+        switch (self.*) {
+            .inline_table => |entries| {
+                for (entries) |*e| {
+                    const ptr: *const Value = &e.value;
+                    const mut: *Value = @constCast(ptr);
+                    mut.deinit(allocator);
+                }
+                allocator.free(std.mem.sliceAsBytes(entries));
+            },
+            else => {},
+        }
+    }
 };
 
 pub const Entry = struct {
     key: []const u8,
     value: Value,
+
+    pub fn deinit(self: *Entry, allocator: Allocator) void {
+        self.value.deinit(allocator);
+    }
 };
 
 pub const Table = struct {
@@ -41,6 +77,7 @@ pub const Table = struct {
     arrays: std.ArrayListUnmanaged(ArrayOfTables) = .{},
 
     pub fn deinit(self: *Table, allocator: Allocator) void {
+        for (self.entries.items) |*e| e.deinit(allocator);
         self.entries.deinit(allocator);
         for (self.tables.items) |*t| t.deinit(allocator);
         self.tables.deinit(allocator);
@@ -54,6 +91,7 @@ pub const ArrayOfTables = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
 
     pub fn deinit(self: *ArrayOfTables, allocator: Allocator) void {
+        for (self.entries.items) |*e| e.deinit(allocator);
         self.entries.deinit(allocator);
     }
 };
@@ -63,6 +101,7 @@ pub const Document = struct {
     tables: std.ArrayListUnmanaged(Table) = .{},
 
     pub fn deinit(self: *Document, allocator: Allocator) void {
+        for (self.root_entries.items) |*e| e.deinit(allocator);
         self.root_entries.deinit(allocator);
         for (self.tables.items) |*t| t.deinit(allocator);
         self.tables.deinit(allocator);
@@ -98,6 +137,18 @@ pub const Document = struct {
 };
 
 const Parser = struct {
+    const Error = error{
+        OutOfMemory,
+        UnexpectedCharacter,
+        EmptyKey,
+        UnexpectedEnd,
+        InvalidValue,
+        UnterminatedString,
+        UnterminatedTable,
+        Overflow,
+        InvalidCharacter,
+    };
+
     allocator: Allocator,
     source: []const u8,
     pos: usize,
@@ -132,12 +183,12 @@ const Parser = struct {
         return c;
     }
 
-    fn expect(self: *Parser, c: u8) !void {
+    fn expect(self: *Parser, c: u8) Parser.Error!void {
         if (self.peek() != c) return error.UnexpectedCharacter;
         self.pos += 1;
     }
 
-    fn parseString(self: *Parser) ![]const u8 {
+    fn parseString(self: *Parser) Parser.Error![]const u8 {
         const quote = self.advance();
         const start = self.pos;
         while (self.pos < self.source.len and self.source[self.pos] != quote) {
@@ -152,11 +203,12 @@ const Parser = struct {
         return result;
     }
 
-    fn parseValue(self: *Parser) !Value {
+    fn parseValue(self: *Parser) Parser.Error!Value {
         self.skipWhitespace();
         const c = self.peek() orelse return error.UnexpectedEnd;
         return switch (c) {
             '"' => .{ .string = try self.parseString() },
+            '{' => .{ .inline_table = try self.parseInlineTable() },
             't', 'f' => blk: {
                 if (std.mem.startsWith(u8, self.source[self.pos..], "true")) {
                     self.pos += 4;
@@ -181,7 +233,31 @@ const Parser = struct {
         };
     }
 
-    fn parseKey(self: *Parser) ![]const u8 {
+    fn parseInlineTable(self: *Parser) Parser.Error![]const InlineEntry {
+        try self.expect('{');
+        var entries = std.ArrayList(InlineEntry).init(self.allocator);
+
+        while (true) {
+            self.skipWhitespace();
+            if (self.peek() == '}') {
+                self.pos += 1;
+                break;
+            }
+            const key = try self.parseKey();
+            self.skipWhitespace();
+            try self.expect('=');
+            const value = try self.parseValue();
+            try entries.append(.{ .key = key, .value = value });
+            self.skipWhitespace();
+            if (self.peek() == ',') {
+                self.pos += 1;
+            }
+        }
+
+        return entries.toOwnedSlice();
+    }
+
+    fn parseKey(self: *Parser) Parser.Error![]const u8 {
         self.skipWhitespace();
         const start = self.pos;
         while (self.pos < self.source.len) {
@@ -193,7 +269,7 @@ const Parser = struct {
         return self.source[start..self.pos];
     }
 
-    fn parseEntries(self: *Parser, entries: *std.ArrayListUnmanaged(Entry)) !void {
+    fn parseEntries(self: *Parser, entries: *std.ArrayListUnmanaged(Entry)) (Parser.Error || Allocator.Error)!void {
         while (self.pos < self.source.len) {
             self.skipWhitespace();
             if (self.pos >= self.source.len) break;
@@ -221,7 +297,7 @@ const Parser = struct {
         }
     }
 
-    fn parseHeaderName(self: *Parser) ![]const u8 {
+    fn parseHeaderName(self: *Parser) Parser.Error![]const u8 {
         const start = self.pos;
         while (self.pos < self.source.len and self.source[self.pos] != ']') {
             self.pos += 1;
@@ -231,14 +307,14 @@ const Parser = struct {
         return name;
     }
 
-    fn parseTableHeader(self: *Parser) ![]const u8 {
+    fn parseTableHeader(self: *Parser) Parser.Error![]const u8 {
         try self.expect('[');
         const name = try self.parseHeaderName();
         try self.expect(']');
         return name;
     }
 
-    fn parseArrayHeader(self: *Parser) ![]const u8 {
+    fn parseArrayHeader(self: *Parser) Parser.Error![]const u8 {
         try self.expect('[');
         try self.expect('[');
         const name = try self.parseHeaderName();
@@ -247,7 +323,7 @@ const Parser = struct {
         return name;
     }
 
-    fn parseDocument(self: *Parser) !Document {
+    fn parseDocument(self: *Parser) (Parser.Error || Allocator.Error)!Document {
         var doc = Document{};
 
         try self.parseEntries(&doc.root_entries);
@@ -294,7 +370,7 @@ const Parser = struct {
     }
 };
 
-pub fn parse(allocator: Allocator, source: []const u8) !Document {
+pub fn parse(allocator: Allocator, source: []const u8) (Parser.Error || Allocator.Error)!Document {
     var p = Parser.init(allocator, source);
     return p.parseDocument();
 }
@@ -376,4 +452,19 @@ test "toml: parse with comments" {
 
     const name = doc.getEntry(null, "name");
     try testing.expectEqualStrings("ara", name.?.asString().?);
+}
+
+test "toml: parse inline table" {
+    const src =
+        \\zod = { source = "npm", version = "3.23.8" }
+    ;
+    var doc = try parse(testing.allocator, src);
+    defer doc.deinit(testing.allocator);
+
+    const val = doc.getEntry(null, "zod");
+    try testing.expect(val != null);
+    const source = val.?.getInline("source");
+    try testing.expectEqualStrings("npm", source.?.asString().?);
+    const version = val.?.getInline("version");
+    try testing.expectEqualStrings("3.23.8", version.?.asString().?);
 }
