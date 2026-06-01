@@ -10,7 +10,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe.linkSystemLibrary("curl");
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -22,7 +21,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    tests.linkSystemLibrary("curl");
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
