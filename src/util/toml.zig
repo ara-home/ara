@@ -11,6 +11,7 @@ pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
     boolean: bool,
+    array: []const Value,
     inline_table: []const InlineEntry,
 
     pub fn asString(self: Value) ?[]const u8 {
@@ -55,6 +56,14 @@ pub const Value = union(enum) {
                     mut.deinit(allocator);
                 }
                 allocator.free(std.mem.sliceAsBytes(entries));
+            },
+            .array => |items| {
+                for (items) |*v| {
+                    const ptr: *const Value = v;
+                    const mut: *Value = @constCast(ptr);
+                    mut.deinit(allocator);
+                }
+                allocator.free(std.mem.sliceAsBytes(items));
             },
             else => {},
         }
@@ -220,6 +229,7 @@ const Parser = struct {
                 }
                 return error.InvalidValue;
             },
+            '[' => .{ .array = try self.parseArray() },
             '0'...'9', '-' => blk: {
                 const start = self.pos;
                 if (c == '-') self.pos += 1;
@@ -231,6 +241,31 @@ const Parser = struct {
             },
             else => error.InvalidValue,
         };
+    }
+
+    fn parseArray(self: *Parser) Parser.Error![]const Value {
+        try self.expect('[');
+        var items = std.ArrayList(Value).init(self.allocator);
+        self.skipWhitespace();
+        if (self.peek() == ']') {
+            self.pos += 1;
+            return items.toOwnedSlice();
+        }
+        while (true) {
+            const val = try self.parseValue();
+            try items.append(val);
+            self.skipWhitespace();
+            if (self.peek() == ',') {
+                self.pos += 1;
+                self.skipWhitespace();
+            } else if (self.peek() == ']') {
+                self.pos += 1;
+                break;
+            } else {
+                return error.UnexpectedCharacter;
+            }
+        }
+        return items.toOwnedSlice();
     }
 
     fn parseInlineTable(self: *Parser) Parser.Error![]const InlineEntry {
@@ -467,4 +502,18 @@ test "toml: parse inline table" {
     try testing.expectEqualStrings("npm", source.?.asString().?);
     const version = val.?.getInline("version");
     try testing.expectEqualStrings("3.23.8", version.?.asString().?);
+}
+
+test "toml: parse string array" {
+    const src =
+        \\members = ["apps/*", "packages/*"]
+    ;
+    var doc = try parse(testing.allocator, src);
+    defer doc.deinit(testing.allocator);
+
+    const val = doc.getEntry(null, "members");
+    try testing.expect(val != null);
+    try testing.expectEqual(@as(usize, 2), val.?.array.len);
+    try testing.expectEqualStrings("apps/*", val.?.array[0].asString().?);
+    try testing.expectEqualStrings("packages/*", val.?.array[1].asString().?);
 }
