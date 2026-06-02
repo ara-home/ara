@@ -2,7 +2,7 @@
 set -eu
 
 echo "  HOOK   pre-commit"
-cd "$(git rev-parse --show-toplevel)/ara"
+cd "$(git rev-parse --show-toplevel)"
 
 echo "  TEST   unit"
 zig build test 2>/dev/null || {
