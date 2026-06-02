@@ -8,7 +8,7 @@ build:
 
 test:
 	@echo "  TEST   unit"
-	@zig build test
+	@zig test src/main.zig
 
 test-e2e: build
 	@echo "  TEST   e2e"
