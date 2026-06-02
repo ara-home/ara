@@ -19,16 +19,35 @@ pub const GitSource = struct {
         self.allocator.free(self.commit);
     }
 
-    pub fn resolve(self: GitSource, a: std.mem.Allocator, n: []const u8) ![]const u8 {
+    pub fn resolve(self: GitSource, a: std.mem.Allocator, _: []const u8) ![]const u8 {
         _ = a;
-        _ = n;
         return self.commit;
     }
 
-    pub fn fetch(self: GitSource, a: std.mem.Allocator, id: types.PackageIdentity) ![]u8 {
-        _ = self;
-        _ = a;
-        _ = id;
-        return "";
+    pub fn fetch(self: GitSource, a: std.mem.Allocator, _: types.PackageIdentity) ![]u8 {
+        const tmp_path = try std.fmt.allocPrint(a, "/tmp/ara-git-{d}", .{std.time.milliTimestamp()});
+        defer a.free(tmp_path);
+        defer std.fs.deleteTreeAbsolute(tmp_path) catch {};
+
+        {
+            const clone = std.process.Child.init(&.{ "git", "clone", "--depth", "1", self.url, tmp_path }, a);
+            const term = try clone.spawnAndWait();
+            switch (term) {
+                .Exited => |code| if (code != 0) return error.GitError,
+                else => return error.GitError,
+            }
+        }
+
+        var archive = std.process.Child.init(&.{ "tar", "-C", tmp_path, "-cf", "-", "." }, a);
+        archive.stdout_behavior = .Pipe;
+        try archive.spawn();
+
+        var buf = std.ArrayList(u8).init(a);
+        errdefer buf.deinit();
+
+        try archive.stdout.?.reader().readAllArrayList(&buf, std.math.maxInt(usize));
+        _ = try archive.wait();
+
+        return buf.toOwnedSlice();
     }
 };
