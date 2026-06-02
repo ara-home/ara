@@ -28,3 +28,38 @@ pub const Method = enum {
         return @tagName(self);
     }
 };
+
+test "Method.toString returns tag name" {
+    try std.testing.expectEqualStrings("scan", Method.scan.toString());
+    try std.testing.expectEqualStrings("verify", Method.verify.toString());
+    try std.testing.expectEqualStrings("audit", Method.audit.toString());
+    try std.testing.expectEqualStrings("shutdown", Method.shutdown.toString());
+    try std.testing.expectEqualStrings("analyze", Method.analyze.toString());
+}
+
+test "Request JSON roundtrip" {
+    var obj = std.json.ObjectMap.init(std.testing.allocator);
+    defer obj.deinit();
+    try obj.put("hash", std.json.Value{ .string = "sha256-abc" });
+
+    const req = Request{
+        .id = 7,
+        .method = "scan",
+        .params = std.json.Value{ .object = obj },
+    };
+
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    try std.json.stringify(req, .{}, buf.writer());
+
+    const json = buf.items;
+    try std.testing.expect(std.mem.containsAtLeast(u8, json, 1, "7"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, json, 1, "scan"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, json, 1, "sha256-abc"));
+}
+
+test "RpcError creation" {
+    const err = RpcError{ .code = -1, .message = "analysis failed" };
+    try std.testing.expectEqual(@as(i32, -1), err.code);
+    try std.testing.expectEqualStrings("analysis failed", err.message);
+}
