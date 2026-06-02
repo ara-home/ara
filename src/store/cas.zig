@@ -69,7 +69,11 @@ pub const Store = struct {
     pub fn contains(self: *Store, hash_str: []const u8) bool {
         const path = self.objectPath(hash_str) catch return false;
         defer self.allocator.free(path);
-        return std.fs.accessAbsolute(path, .{}) != null;
+        if (std.fs.accessAbsolute(path, .{})) {
+            return true;
+        } else |_| {
+            return false;
+        }
     }
 
     pub fn remove(self: *Store, hash_str: []const u8) !void {
@@ -138,6 +142,43 @@ test "store: deduplication" {
     try std.testing.expectEqualStrings(h1, h2);
     std.testing.allocator.free(h1);
     std.testing.allocator.free(h2);
+}
+
+test "store: contains and remove" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(store_path);
+
+    var store = try Store.init(std.testing.allocator, store_path);
+    defer store.deinit();
+    try store.ensureDirs();
+
+    const hash_str = try store.put("data");
+    defer std.testing.allocator.free(hash_str);
+
+    try std.testing.expect(store.contains(hash_str));
+    try store.remove(hash_str);
+    try std.testing.expect(!store.contains(hash_str));
+}
+
+test "store: putGraph roundtrip" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(store_path);
+
+    var store = try Store.init(std.testing.allocator, store_path);
+    defer store.deinit();
+    try store.ensureDirs();
+
+    const graph_bytes = "graph data here";
+    const hash_str = try store.putGraph(graph_bytes);
+    defer std.testing.allocator.free(hash_str);
+
+    try std.testing.expect(std.mem.startsWith(u8, hash_str, "graph-"));
 }
 
 test "store: not found returns null" {

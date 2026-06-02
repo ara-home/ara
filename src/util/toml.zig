@@ -504,6 +504,55 @@ test "toml: parse inline table" {
     try testing.expectEqualStrings("3.23.8", version.?.asString().?);
 }
 
+test "toml: error unterminated string" {
+    const src = "name = \"unterminated";
+    try std.testing.expectError(error.UnterminatedString, parse(testing.allocator, src));
+}
+
+test "toml: error unexpected end" {
+    const src = "name = ";
+    try std.testing.expectError(error.UnexpectedEnd, parse(testing.allocator, src));
+}
+
+test "toml: error invalid value" {
+    const src = "key = weird";
+    try std.testing.expectError(error.InvalidValue, parse(testing.allocator, src));
+}
+
+test "toml: error empty key" {
+    const src = " = \"value\"";
+    try std.testing.expectError(error.EmptyKey, parse(testing.allocator, src));
+}
+
+test "toml: error unterminated table" {
+    const src = "[project";
+    try std.testing.expectError(error.UnterminatedTable, parse(testing.allocator, src));
+}
+
+test "toml: duplicate key keeps first value" {
+    const src =
+        \\name = "first"
+        \\name = "second"
+    ;
+    var doc = try parse(testing.allocator, src);
+    defer doc.deinit(testing.allocator);
+    const val = doc.getEntry(null, "name");
+    try testing.expect(val != null);
+    try testing.expectEqualStrings("first", val.?.asString().?);
+}
+
+test "toml: parse nested table" {
+    const src =
+        \\[a.b]
+        \\key = "val"
+    ;
+    var doc = try parse(testing.allocator, src);
+    defer doc.deinit(testing.allocator);
+    const tbl = doc.getTable("a.b");
+    try testing.expect(tbl != null);
+    try testing.expectEqualStrings("val", doc.getEntry("a.b", "key").?.asString().?);
+}
+
 test "toml: parse string array" {
     const src =
         \\members = ["apps/*", "packages/*"]

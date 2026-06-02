@@ -80,3 +80,25 @@ test "sandbox profiles: hermetic has deterministic clock" {
     const config = SandboxConfig.forProfile(.hermetic);
     try std.testing.expect(config.clock.deterministic);
 }
+
+test "sandbox profiles: custom has defaults" {
+    const config = SandboxConfig.forProfile(.custom);
+    try std.testing.expect(!config.network.enabled);
+    try std.testing.expect(!config.process.allow_spawn);
+    try std.testing.expect(!config.clock.deterministic);
+}
+
+test "sandbox profiles: fromString" {
+    try std.testing.expectEqual(.open, try Profile.fromString("open"));
+    try std.testing.expectEqual(.restricted, try Profile.fromString("restricted"));
+    try std.testing.expectEqual(.hermetic, try Profile.fromString("hermetic"));
+    try std.testing.expectEqual(.custom, try Profile.fromString("custom"));
+    try std.testing.expectError(error.UnknownProfile, Profile.fromString("unknown"));
+}
+
+test "sandbox profiles: all enum values roundtrip" {
+    inline for (std.meta.fields(Profile)) |f| {
+        const tag: Profile = @enumFromInt(f.value);
+        try std.testing.expectEqual(tag, try Profile.fromString(f.name));
+    }
+}

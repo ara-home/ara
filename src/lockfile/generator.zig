@@ -59,4 +59,39 @@ test "lockfile: generate and parse back" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "zod"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "3.23.8"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "mvs"));
+
+    var parsed = try @import("parser.zig").parse(std.testing.allocator, output);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("zod", parsed.packages[0].name);
+    try std.testing.expectEqualStrings("mvs", parsed.graph.resolver);
+}
+
+test "lockfile: generate with all fields" {
+    const lf = Lockfile{
+        .graph = .{
+            .resolver = "mvs",
+            .generated_at = "2026-06-01T22:00:00Z",
+            .graph_hash = null,
+        },
+        .packages = &.{
+            .{
+                .name = "react",
+                .version = "18.3.0",
+                .source = "github",
+                .package_hash = "sha256:xyz",
+                .integrity = "sha256:xyz",
+                .signature = null,
+                .repository = "facebook/react",
+                .commit = "abc123",
+                .dependencies = &.{"shared"},
+            },
+        },
+    };
+
+    const output = try generate(std.testing.allocator, lf);
+    defer std.testing.allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "facebook/react"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "abc123"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "shared"));
 }

@@ -227,6 +227,54 @@ test "manifest: parse workspace" {
     try std.testing.expectEqualStrings("apps/*", m.workspace.?.members[0]);
 }
 
+test "manifest: error missing project section" {
+    const src =
+        \\name = "no-project"
+        \\version = "0.1.0"
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", m.project.name);
+}
+
+test "manifest: error unknown source type" {
+    const src =
+        \\[project]
+        \\name = "app"
+        \\version = "1.0.0"
+        \\
+        \\[deps]
+        \\bad = { source = "nonexistent", path = "../lib" }
+    ;
+    try std.testing.expectError(error.UnknownSourceType, parse(std.testing.allocator, src));
+}
+
+test "manifest: error missing source field" {
+    const src =
+        \\[project]
+        \\name = "app"
+        \\version = "1.0.0"
+        \\
+        \\[deps]
+        \\lib = { path = "../lib" }
+    ;
+    try std.testing.expectError(error.UnknownSourceType, parse(std.testing.allocator, src));
+}
+
+test "manifest: error invalid risk level" {
+    const src =
+        \\[project]
+        \\name = "app"
+        \\version = "1.0.0"
+        \\
+        \\[security]
+        \\risk_threshold = "ultra"
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit(std.testing.allocator);
+    try std.testing.expect(m.security.?.risk_threshold == null);
+}
+
 test "manifest: parse security and build" {
     const src =
         \\[project]
