@@ -1,5 +1,10 @@
 const std = @import("std");
 const types = @import("../types.zig");
+const WorkspaceSource = @import("workspace.zig").WorkspaceSource;
+const LocalSource = @import("local.zig").LocalSource;
+const GitSource = @import("git.zig").GitSource;
+const GithubSource = @import("github.zig").GithubSource;
+const RegistrySource = @import("registry.zig").RegistrySource;
 
 pub const Source = union(enum) {
     workspace: WorkspaceSource,

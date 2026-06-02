@@ -1,11 +1,19 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const manifest = @import("../manifest/parser.zig");
-const lockfile_parser = @import("../lockfile/parser.zig");
 const lockfile_types = @import("../lockfile/types.zig");
 const lockfile_gen = @import("../lockfile/generator.zig");
+const manifest_types = @import("../manifest/types.zig");
 const resolver = @import("../resolver/mvs.zig");
 const store_cas = @import("../store/cas.zig");
+const source_mod = @import("../source/mod.zig");
+const RegistrySource = @import("../source/registry.zig").RegistrySource;
+const GithubSource = @import("../source/github.zig").GithubSource;
+const GitSource = @import("../source/git.zig").GitSource;
+const LocalSource = @import("../source/local.zig").LocalSource;
+const WorkspaceSource = @import("../source/workspace.zig").WorkspaceSource;
+
+const DependencyEntry = manifest_types.DependencyEntry;
 
 pub const Command = enum {
     install,
@@ -21,13 +29,54 @@ pub const Command = enum {
     }
 };
 
+fn currentTimestamp(allocator: std.mem.Allocator) ![]u8 {
+    const ts = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, std.time.timestamp())) };
+    const yd = ts.getYearDay();
+    const ds = ts.getDaySeconds();
+    const month = @intFromEnum(yd.month()) + 1;
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year, month, yd.day_index + 1,
+        ds.hours, ds.minutes, ds.seconds,
+    });
+}
+
+fn findDep(deps: []const DependencyEntry, name: []const u8) ?DependencyEntry {
+    for (deps) |d| {
+        if (std.mem.eql(u8, d.name, name)) return d;
+    }
+    return null;
+}
+
+fn createSource(allocator: std.mem.Allocator, source_type: types.SourceType, dep: DependencyEntry) !source_mod.Source {
+    return switch (source_type) {
+        .npm, .registry => source_mod.Source{ .registry = try RegistrySource.init(allocator, dep.url orelse "https://registry.npmjs.org") },
+        .github => source_mod.Source{ .github = try GithubSource.init(allocator, dep.repo orelse return error.MissingRepo) },
+        .git => source_mod.Source{ .git = try GitSource.init(allocator, dep.url orelse return error.MissingUrl, dep.commit orelse "HEAD") },
+        .local => source_mod.Source{ .local = try LocalSource.init(allocator, dep.path orelse return error.MissingPath) },
+        .workspace => source_mod.Source{ .workspace = try WorkspaceSource.init(allocator, dep.path orelse ".") },
+    };
+}
+
+fn extractTarball(allocator: std.mem.Allocator, tarball: []const u8, dest: []const u8) !void {
+    var child = std.process.Child.init(&.{ "tar", "-xzf", "-", "-C", dest }, allocator);
+    child.stdin_behavior = .Pipe;
+    try child.spawn();
+    try child.stdin.?.writeAll(tarball);
+    child.stdin.?.close();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.ExtractFailed,
+        else => return error.ExtractFailed,
+    }
+}
+
 pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     const manifest_path = try std.fs.path.join(allocator, &.{ cwd, "ara.toml" });
     defer allocator.free(manifest_path);
 
     const file = std.fs.openFileAbsolute(manifest_path, .{ .mode = .read_only }) catch |err| switch (err) {
         error.FileNotFound => {
-            std.debug.print("error: ara.toml not found in {s}\n", .{cwd});
+            std.debug.print("error: ara.toml not found\n", .{});
             return err;
         },
         else => return err,
@@ -49,12 +98,12 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
         return;
     }
 
-    var resolve = resolver.Resolver.init(allocator);
-    defer resolve.deinit();
+    var r = resolver.Resolver.init(allocator);
+    defer r.deinit();
 
     for (m.deps) |dep| {
         const constraint = try types.Constraint.parse(dep.version orelse "*");
-        try resolve.addConstraint(.{
+        try r.addConstraint(.{
             .package = dep.name,
             .constraint = constraint,
             .source = dep.source,
@@ -62,7 +111,7 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
         });
     }
 
-    var graph = try resolve.resolve();
+    var graph = try r.resolve();
     defer graph.deinit();
 
     std.debug.print("Resolved {d} packages\n", .{graph.nodes.items.len});
@@ -75,29 +124,82 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     defer store.deinit();
     try store.ensureDirs();
 
-    for (graph.nodes.items) |node| {
+    const node_modules = try std.fs.path.join(allocator, &.{ cwd, "node_modules" });
+    defer allocator.free(node_modules);
+    std.fs.makeDirAbsolute(node_modules) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    var pkg_entries = std.ArrayList(lockfile_types.PackageEntry).init(allocator);
+    defer pkg_entries.deinit();
+
+    for (graph.nodes.items) |*node| {
         var ver_buf: [64]u8 = undefined;
-        const ver_str = try std.fmt.bufPrint(&ver_buf, "{}.{}.{}", .{ node.version.major, node.version.minor, node.version.patch });
-        std.debug.print("  {s}@{s}\n", .{ node.name, ver_str });
+        const ver_str = std.fmt.bufPrint(&ver_buf, "{}.{}.{}", .{ node.version.major, node.version.minor, node.version.patch }) catch "0.0.0";
+
+        const dep = findDep(m.deps, node.name) orelse {
+            std.debug.print("  skipped {s}: no dependency config\n", .{node.name});
+            continue;
+        };
+
+        var src = createSource(allocator, node.source, dep) catch |err| {
+            std.debug.print("  skipped {s}: failed to create source ({s})\n", .{ node.name, @errorName(err) });
+            continue;
+        };
+        defer src.deinit();
+
+        std.debug.print("  fetching {s}@{s}...\n", .{ node.name, ver_str });
+
+        const pkg_content = src.fetch(allocator, .{
+            .source = node.source,
+            .name = node.name,
+            .version = node.version,
+        }) catch |err| {
+            std.debug.print("  failed to fetch {s}: {s}\n", .{ node.name, @errorName(err) });
+            continue;
+        };
+        defer allocator.free(pkg_content);
+
+        const hash_str = try store.put(pkg_content);
+        defer allocator.free(hash_str);
+
+        const pkg_dir = try std.fs.path.join(allocator, &.{ node_modules, node.name });
+        defer allocator.free(pkg_dir);
+        std.fs.deleteTreeAbsolute(pkg_dir) catch {};
+        try std.fs.makeDirAbsolute(pkg_dir);
+        extractTarball(allocator, pkg_content, pkg_dir) catch |err| {
+            std.debug.print("  failed to extract {s}: {s}\n", .{ node.name, @errorName(err) });
+            continue;
+        };
+
+        try pkg_entries.append(.{
+            .name = node.name,
+            .version = ver_str,
+            .source = @tagName(node.source),
+            .package_hash = hash_str,
+        });
+
+        std.debug.print("  ✓ {s}@{s} ({s})\n", .{ node.name, ver_str, hash_str });
     }
+
+    const ts = try currentTimestamp(allocator);
+    defer allocator.free(ts);
 
     const lock_content = try lockfile_gen.generate(allocator, .{
         .graph = .{
             .resolver = "mvs",
-            .generated_at = "TODO",
+            .generated_at = ts,
             .graph_hash = null,
         },
-        .packages = &.{},
+        .packages = pkg_entries.items,
     });
     defer allocator.free(lock_content);
 
     const lock_path = try std.fs.path.join(allocator, &.{ cwd, "ara.lock" });
     defer allocator.free(lock_path);
 
-    const lock_file = try std.fs.createFileAbsolute(lock_path, .{});
-    defer lock_file.close();
-    try lock_file.writeAll(lock_content);
-
+    try std.fs.writeFileAbsolute(lock_path, lock_content);
     std.debug.print("Lockfile written to ara.lock\n", .{});
 }
 

@@ -19,19 +19,15 @@ pub const LocalSource = struct {
     }
 
     pub fn fetch(self: LocalSource, a: std.mem.Allocator, _: types.PackageIdentity) ![]u8 {
-        const manifest_path = try std.fs.path.join(a, &.{ self.path, "ara.toml" });
-        defer a.free(manifest_path);
+        var child = std.process.Child.init(&.{ "tar", "-C", self.path, "-cf", "-", "." }, a);
+        child.stdout_behavior = .Pipe;
+        try child.spawn();
 
-        const file = std.fs.openFileAbsolute(manifest_path, .{ .mode = .read_only }) catch |err| switch (err) {
-            error.FileNotFound => return error.PackageNotFound,
-            else => return err,
-        };
-        defer file.close();
+        var buf = std.ArrayList(u8).init(a);
+        errdefer buf.deinit();
+        try child.stdout.?.reader().readAllArrayList(&buf, std.math.maxInt(usize));
+        _ = try child.wait();
 
-        const stat = try file.stat();
-        const buf = try a.alloc(u8, @intCast(stat.size));
-        errdefer a.free(buf);
-        _ = try file.readAll(buf);
-        return buf;
+        return buf.toOwnedSlice();
     }
 };
