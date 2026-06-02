@@ -29,8 +29,37 @@ pub const WorkspaceSource = struct {
         var buf = std.ArrayList(u8).init(a);
         errdefer buf.deinit();
         try child.stdout.?.reader().readAllArrayList(&buf, std.math.maxInt(usize));
-        _ = try child.wait();
+
+        const term = try child.wait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.TarFailed,
+            else => return error.TarFailed,
+        }
 
         return buf.toOwnedSlice();
     }
 };
+
+test "workspace: fetch produces valid tar" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "ara.toml", .data = "[project]\nname = \"ws-member\"\nversion = \"0.1.0\"\n" });
+
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(path);
+
+    var src = try WorkspaceSource.init(std.testing.allocator, path);
+    defer src.deinit();
+
+    const id = types.PackageIdentity{
+        .source = .workspace,
+        .name = "ws-member",
+        .version = try types.Version.parse("0.1.0"),
+    };
+    const tarball = try src.fetch(std.testing.allocator, id);
+    defer std.testing.allocator.free(tarball);
+
+    try std.testing.expect(tarball.len > 512);
+    try std.testing.expectEqual(@as(u8, 0x75), tarball[257]); // 'u' in "ustar"
+}

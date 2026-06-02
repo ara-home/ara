@@ -31,12 +31,17 @@ pub const Command = enum {
 
 fn currentTimestamp(allocator: std.mem.Allocator) ![]u8 {
     const ts = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, std.time.timestamp())) };
-    const yd = ts.getYearDay();
-    const ds = ts.getDaySeconds();
-    const month = @intFromEnum(yd.month()) + 1;
+    const epoch_day = ts.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = ts.getDaySeconds();
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, month, yd.day_index + 1,
-        ds.hours, ds.minutes, ds.seconds,
+        year_day.year,
+        month_day.month.numeric() + 1,
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
     });
 }
 
@@ -70,6 +75,34 @@ fn extractTarball(allocator: std.mem.Allocator, tarball: []const u8, dest: []con
     }
 }
 
+test "currentTimestamp format" {
+    const ts = try currentTimestamp(std.testing.allocator);
+    defer std.testing.allocator.free(ts);
+    try std.testing.expect(ts.len == 20);
+    try std.testing.expect(ts[4] == '-');
+    try std.testing.expect(ts[7] == '-');
+    try std.testing.expect(ts[10] == 'T');
+    try std.testing.expect(ts[19] == 'Z');
+}
+
+test "findDep finds matching dependency" {
+    const deps = [_]DependencyEntry{
+        .{ .name = "zod", .source = .npm },
+        .{ .name = "react", .source = .github },
+    };
+    const found = findDep(&deps, "zod");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("zod", found.?.name);
+    try std.testing.expectEqual(.npm, found.?.source);
+}
+
+test "findDep returns null for missing" {
+    const deps = [_]DependencyEntry{
+        .{ .name = "zod", .source = .npm },
+    };
+    try std.testing.expect(findDep(&deps, "missing") == null);
+}
+
 pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     const manifest_path = try std.fs.path.join(allocator, &.{ cwd, "ara.toml" });
     defer allocator.free(manifest_path);
@@ -88,7 +121,7 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     defer allocator.free(content);
     _ = try file.readAll(content);
 
-    const m = try manifest.parse(allocator, content);
+    var m = try manifest.parse(allocator, content);
     defer m.deinit(allocator);
 
     std.debug.print("Installing dependencies for {s} v{s}\n", .{ m.project.name, m.project.version });
@@ -116,7 +149,9 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
 
     std.debug.print("Resolved {d} packages\n", .{graph.nodes.items.len});
 
-    const home = std.process.getenv("HOME") orelse ".";
+    const home_buf = std.process.getEnvVarOwned(allocator, "HOME") catch "";
+    defer if (home_buf.len > 0) allocator.free(home_buf);
+    const home = if (home_buf.len > 0) home_buf else ".";
     const store_base = try std.fs.path.join(allocator, &.{ home, ".ara", "store" });
     defer allocator.free(store_base);
 
@@ -199,13 +234,13 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     const lock_path = try std.fs.path.join(allocator, &.{ cwd, "ara.lock" });
     defer allocator.free(lock_path);
 
-    try std.fs.writeFileAbsolute(lock_path, lock_content);
+    try std.fs.cwd().writeFile(.{ .sub_path = lock_path, .data = lock_content });
     std.debug.print("Lockfile written to ara.lock\n", .{});
 }
 
 pub fn run(allocator: std.mem.Allocator, _: []const u8, script: []const u8) !void {
     std.debug.print("running: {s}\n", .{script});
 
-    const child = std.process.Child.init(&.{ "sh", "-c", script }, allocator);
+    var child = std.process.Child.init(&.{ "sh", "-c", script }, allocator);
     _ = try child.spawnAndWait();
 }
