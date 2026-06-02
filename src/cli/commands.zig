@@ -68,6 +68,7 @@ fn extractTarball(allocator: std.mem.Allocator, tarball: []const u8, dest: []con
     try child.spawn();
     try child.stdin.?.writeAll(tarball);
     child.stdin.?.close();
+    child.stdin = null;
     const term = try child.wait();
     switch (term) {
         .Exited => |code| if (code != 0) return error.ExtractFailed,

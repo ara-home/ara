@@ -14,6 +14,7 @@ pub const Store = struct {
     }
 
     pub fn ensureDirs(self: *Store) !void {
+        try std.fs.cwd().makePath(self.base_path);
         const dirs = [_][]const u8{ "objects", "graphs", "snapshots", "cache", "temp" };
         for (dirs) |d| {
             const path = try std.fs.path.join(self.allocator, &.{ self.base_path, d });

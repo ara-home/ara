@@ -69,7 +69,8 @@ pub const Resolver = struct {
                 .greaterThan => |v| v,
                 .caret => |v| v,
                 .tilde => |v| v,
-                .lessOrEqual, .lessThan, .wildcard => continue,
+                .lessOrEqual, .lessThan => continue,
+                .wildcard => types.Version.parse("0.0.0") catch continue,
             };
 
             if (best) |b| {

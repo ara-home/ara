@@ -38,7 +38,7 @@ pub const GitSource = struct {
             }
         }
 
-        var archive = std.process.Child.init(&.{ "tar", "-C", tmp_path, "-cf", "-", "." }, a);
+        var archive = std.process.Child.init(&.{ "tar", "-C", tmp_path, "-czf", "-", "." }, a);
         archive.stdout_behavior = .Pipe;
         try archive.spawn();
 

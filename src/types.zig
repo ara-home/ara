@@ -100,6 +100,10 @@ pub const Constraint = union(enum) {
             return .{ .lessThan = try Version.parse(s[1..]) };
         }
 
+        if (s.len == 1 and s[0] == '*') {
+            return .{ .wildcard = .{ .major = 0, .minor = null } };
+        }
+
         if (std.mem.indexOfScalar(u8, s, 'x')) |_| {
             const parts = splitWildcard(s);
             return .{ .wildcard = parts };

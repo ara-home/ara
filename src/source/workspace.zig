@@ -22,7 +22,7 @@ pub const WorkspaceSource = struct {
     }
 
     pub fn fetch(self: WorkspaceSource, a: std.mem.Allocator, _: types.PackageIdentity) ![]u8 {
-        var child = std.process.Child.init(&.{ "tar", "-C", self.root_path, "-cf", "-", "." }, a);
+        var child = std.process.Child.init(&.{ "tar", "-C", self.root_path, "-czf", "-", "." }, a);
         child.stdout_behavior = .Pipe;
         try child.spawn();
 
@@ -60,6 +60,7 @@ test "workspace: fetch produces valid tar" {
     const tarball = try src.fetch(std.testing.allocator, id);
     defer std.testing.allocator.free(tarball);
 
-    try std.testing.expect(tarball.len > 512);
-    try std.testing.expectEqual(@as(u8, 0x75), tarball[257]); // 'u' in "ustar"
+    try std.testing.expect(tarball.len > 64);
+    try std.testing.expectEqual(@as(u8, 0x1f), tarball[0]); // gzip magic
+    try std.testing.expectEqual(@as(u8, 0x8b), tarball[1]);
 }
