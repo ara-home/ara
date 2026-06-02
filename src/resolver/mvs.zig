@@ -94,11 +94,10 @@ pub const Resolver = struct {
             try seen.put(c.package, {});
 
             const selected = selectVersion(self.constraints.items, c.package) orelse continue;
-            const parsed = selected;
             const node = Node{
                 .name = c.package,
                 .source = c.source,
-                .version = parsed,
+                .version = selected,
             };
             try graph.addNode(node);
         }

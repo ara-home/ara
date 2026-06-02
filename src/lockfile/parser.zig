@@ -17,10 +17,6 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Lockfile {
 
     var lockfile = Lockfile{};
 
-    if (doc.getEntry(null, "version")) |v| {
-        _ = v;
-    }
-
     if (doc.getTable("graph")) |tbl| {
         var meta = GraphMeta{};
         for (tbl.entries.items) |e| {

@@ -1,5 +1,4 @@
 const std = @import("std");
-const hash = @import("util/hash.zig");
 
 pub const SourceType = enum {
     workspace,
@@ -62,21 +61,6 @@ pub const Version = struct {
         const num = try std.fmt.parseInt(u32, s.*[0..end], 10);
         s.* = s.*[end..];
         return num;
-    }
-
-    pub fn format(self: Version, allocator: std.mem.Allocator) ![]u8 {
-        var result = try std.fmt.allocPrint(allocator, "{}.{}.{}", .{ self.major, self.minor, self.patch });
-        if (self.prerelease) |pre| {
-            const new = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ result, pre });
-            allocator.free(result);
-            result = new;
-        }
-        if (self.build) |b| {
-            const new = try std.fmt.allocPrint(allocator, "{s}+{s}", .{ result, b });
-            allocator.free(result);
-            result = new;
-        }
-        return result;
     }
 
     pub fn order(self: Version, other: Version) std.math.Order {
@@ -172,61 +156,11 @@ pub const PackageIdentity = struct {
     content_hash: ?[]const u8 = null,
 };
 
-pub const Dependency = struct {
-    name: []const u8,
-    source: SourceType,
-    constraint: Constraint,
-
-    source_config: SourceConfig = .{},
-};
-
-pub const SourceConfig = struct {
-    repo: ?[]const u8 = null,
-    url: ?[]const u8 = null,
-    commit: ?[]const u8 = null,
-    path: ?[]const u8 = null,
-    package: ?[]const u8 = null,
-};
-
 pub const RiskLevel = enum {
     low,
     medium,
     high,
     critical,
-};
-
-pub const SandboxProfile = enum {
-    open,
-    restricted,
-    hermetic,
-    custom,
-};
-
-pub const Error = error{
-    UnknownSourceType,
-    InvalidVersion,
-    InvalidConstraint,
-    InvalidHashLength,
-    EmptyConstraint,
-    ManifestNotFound,
-    InvalidManifest,
-    LockfileNotFound,
-    InvalidLockfile,
-    StoreNotFound,
-    SourceNotFound,
-    ResolutionFailed,
-    NetworkError,
-    IntegrityMismatch,
-    GitError,
-    PermissionDenied,
-    ResourceBusy,
-    OutOfMemory,
-    InvalidPath,
-    DuplicatePackage,
-    CycleDetected,
-    UnresolvedReference,
-    IpcError,
-    SandboxError,
 };
 
 test "version: parse and compare" {

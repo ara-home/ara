@@ -77,21 +77,38 @@ fn parseDeps(allocator: std.mem.Allocator, table: *const toml.Table) ![]Dependen
     var deps = std.ArrayList(DependencyEntry).init(allocator);
 
     for (table.entries.items) |e| {
-        const src_type_str = e.value.getInline("source") orelse return error.UnknownSourceType;
-        const src_str = src_type_str.asString() orelse return error.UnknownSourceType;
-        const source = types.SourceType.fromString(src_str) catch return error.UnknownSourceType;
-
-        const entry = DependencyEntry{
-            .name = e.key,
-            .source = source,
-            .version = if (e.value.getInline("version")) |v| v.asString() else null,
-            .repo = if (e.value.getInline("repo")) |v| v.asString() else null,
-            .url = if (e.value.getInline("url")) |v| v.asString() else null,
-            .commit = if (e.value.getInline("commit")) |v| v.asString() else null,
-            .path = if (e.value.getInline("path")) |v| v.asString() else null,
-            .package = if (e.value.getInline("package")) |v| v.asString() else null,
+        const inline_entries = switch (e.value) {
+            .inline_table => |entries| entries,
+            else => return error.UnknownSourceType,
         };
 
+        var entry = DependencyEntry{
+            .name = e.key,
+            .source = .npm,
+        };
+
+        var has_source = false;
+        for (inline_entries) |ie| {
+            if (std.mem.eql(u8, ie.key, "source")) {
+                const src_str = ie.value.asString() orelse return error.UnknownSourceType;
+                entry.source = types.SourceType.fromString(src_str) catch return error.UnknownSourceType;
+                has_source = true;
+            } else if (std.mem.eql(u8, ie.key, "version")) {
+                entry.version = ie.value.asString();
+            } else if (std.mem.eql(u8, ie.key, "repo")) {
+                entry.repo = ie.value.asString();
+            } else if (std.mem.eql(u8, ie.key, "url")) {
+                entry.url = ie.value.asString();
+            } else if (std.mem.eql(u8, ie.key, "commit")) {
+                entry.commit = ie.value.asString();
+            } else if (std.mem.eql(u8, ie.key, "path")) {
+                entry.path = ie.value.asString();
+            } else if (std.mem.eql(u8, ie.key, "package")) {
+                entry.package = ie.value.asString();
+            }
+        }
+
+        if (!has_source) return error.UnknownSourceType;
         try deps.append(entry);
     }
 
