@@ -86,4 +86,5 @@ test {
     _ = @import("types.zig");
     _ = @import("manifest/types.zig");
     _ = @import("lockfile/types.zig");
+    _ = @import("ipc.zig");
 }
