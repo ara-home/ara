@@ -28,9 +28,11 @@ pub struct Cli {
 pub enum Commands {
     /// Install project dependencies
     Install,
-    /// Run a script defined in ara.toml
+    /// Run a script in a sandboxed environment
     Run {
         script: String,
+        #[arg(long, default_value = "runtime")]
+        profile: String,
     },
     /// Analyze a package for security patterns
     Analyze {
@@ -58,7 +60,7 @@ impl Cli {
     pub fn run(&self) -> Result<()> {
         match &self.command {
             Commands::Install => cmd_install(),
-            Commands::Run { script } => cmd_run(script),
+            Commands::Run { script, profile } => cmd_run(script, profile),
             Commands::Analyze { path } => cmd_analyze(path),
             Commands::Audit { path } => cmd_audit(path),
             Commands::Build => {
@@ -584,9 +586,10 @@ fn cmd_gc_in(store_base: &std::path::Path) -> Result<()> {
 
 // ── run command ────────────────────────────────────────────────────────────
 
-fn cmd_run(script: &str) -> Result<()> {
-    println!("running: {script}");
-    let config = SandboxConfig::for_profile(Profile::Restricted);
+fn cmd_run(script: &str, profile: &str) -> Result<()> {
+    let profile: Profile = profile.parse().map_err(|e| anyhow::anyhow!("invalid profile: {e}"))?;
+    println!("running: {script} ({profile:?})");
+    let config = SandboxConfig::for_profile(profile);
     let executor = Executor::new(config);
     executor.execute(script)?;
     Ok(())

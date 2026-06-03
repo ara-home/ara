@@ -19,7 +19,7 @@ impl FromStr for Profile {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "open" => Ok(Self::Open),
+            "runtime" | "open" => Ok(Self::Open),
             "restricted" => Ok(Self::Restricted),
             "hermetic" => Ok(Self::Hermetic),
             "custom" => Ok(Self::Custom),
