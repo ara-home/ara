@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -27,7 +27,10 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Install project dependencies
-    Install,
+    Install {
+        #[arg(long)]
+        non_interactive: bool,
+    },
     /// Run a script in a sandboxed environment
     Run {
         script: String,
@@ -57,7 +60,7 @@ pub enum Commands {
 impl Cli {
     pub fn run(&self) -> Result<()> {
         match &self.command {
-            Commands::Install => cmd_install(),
+            Commands::Install { non_interactive } => cmd_install(*non_interactive),
             Commands::Run { script, profile } => cmd_run(script, profile),
             Commands::Analyze { path } => cmd_analyze(path),
             Commands::Audit { path } => cmd_audit(path),
@@ -410,15 +413,65 @@ fn cmd_audit(path: &str) -> Result<()> {
     Ok(())
 }
 
+// ── interactive prompt ─────────────────────────────────────────────────
+
+enum AllowDecision {
+    Yes,
+    No,
+    Sandbox,
+}
+
+fn prompt_allow_package(
+    name: &str,
+    version: &str,
+    findings: &[crate::types::Finding],
+) -> AllowDecision {
+    println!("\n  ⚠  {name}@{version} wants to:");
+    let reset = "\x1b[0m";
+    for f in findings {
+        let color = severity_color(&f.severity.to_string());
+        let label = severity_label(&f.severity.to_string());
+        println!("  {color}· {:<30} [{label}]{reset}  {}", f.description, f.pattern);
+    }
+
+    loop {
+        print!("\n  Allow? (yes / no / sandbox / inspect) ");
+        let _ = io::stdout().flush();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            return AllowDecision::No;
+        }
+
+        match input.trim().to_lowercase().as_str() {
+            "yes" | "y" => return AllowDecision::Yes,
+            "no" | "n" => return AllowDecision::No,
+            "sandbox" | "s" => return AllowDecision::Sandbox,
+            "inspect" | "i" => {
+                let risk = findings
+                    .iter()
+                    .map(|f| f.severity)
+                    .max()
+                    .unwrap_or(crate::types::RiskLevel::Low);
+                print_findings(findings, risk);
+                // loop continues
+            }
+            _ => {
+                println!("  Invalid option. Please type yes, no, sandbox, or inspect.");
+            }
+        }
+    }
+}
+
 // ── install command ────────────────────────────────────────────────────────
 
-fn cmd_install() -> Result<()> {
+fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    cmd_install_in(&cwd)
+    cmd_install_in(&cwd, non_interactive)
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
+fn cmd_install_in(cwd: &std::path::Path, non_interactive: bool) -> Result<()> {
     let manifest_path = cwd.join("ara.toml");
 
     let content = std::fs::read_to_string(&manifest_path)
@@ -588,36 +641,58 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
         }
 
         // Step 4: Analyze package and capture security info
-        let security = if let Ok(result) = analyzer::analyze_package(&pkg_dir) {
-            if result.findings.is_empty() {
-                print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-                Some(SecurityMeta {
-                    risk_level: Some(result.risk_level.to_string()),
-                    analysis_version: Some("1.0.0".to_string()),
-                })
-            } else {
-                let rl = result.risk_level;
-                let first = &result.findings[0];
-                let loc = first.location.as_deref().unwrap_or("");
-                print!(
-                    "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                    node.name,
-                    ver_str,
-                    hash_str,
-                    result.findings.len(),
-                    rl,
-                    first.description,
-                    loc
-                );
-                Some(SecurityMeta {
-                    risk_level: Some(rl.to_string()),
-                    analysis_version: Some("1.0.0".to_string()),
-                })
+        let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
+            Ok(result) => {
+                if result.findings.is_empty() {
+                    print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                    (true, Some(SecurityMeta {
+                        risk_level: Some(result.risk_level.to_string()),
+                        analysis_version: Some("1.0.0".to_string()),
+                    }))
+                } else if non_interactive {
+                    let rl = result.risk_level;
+                    let first = &result.findings[0];
+                    let loc = first.location.as_deref().unwrap_or("");
+                    print!(
+                        "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
+                        node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc
+                    );
+                    (true, Some(SecurityMeta {
+                        risk_level: Some(rl.to_string()),
+                        analysis_version: Some("1.0.0".to_string()),
+                    }))
+                } else {
+                    match prompt_allow_package(&node.name, &ver_str, &result.findings) {
+                        AllowDecision::Yes | AllowDecision::Sandbox => {
+                            println!(
+                                "  ✓ {}@{} ({}) — allowed",
+                                node.name, ver_str, hash_str
+                            );
+                            (true, Some(SecurityMeta {
+                                risk_level: Some(result.risk_level.to_string()),
+                                analysis_version: Some("1.0.0".to_string()),
+                            }))
+                        }
+                        AllowDecision::No => {
+                            let _ = std::fs::remove_dir_all(&pkg_dir);
+                            println!(
+                                "  ✗ {}@{} ({}) — denied",
+                                node.name, ver_str, hash_str
+                            );
+                            (false, None)
+                        }
+                    }
+                }
             }
-        } else {
-            print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-            None
+            Err(_) => {
+                print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                (true, None)
+            }
         };
+
+        if !allowed {
+            continue;
+        }
 
         pkg_entries.push(PackageEntry {
             name: node.name.clone(),
@@ -935,7 +1010,7 @@ mod tests {
         );
         std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
 
-        cmd_install_in(&root_path).unwrap();
+        cmd_install_in(&root_path, true).unwrap();
 
         assert!(root_path.join("node_modules").exists());
         assert!(root_path.join("node_modules/dep-a").exists());
@@ -957,13 +1032,13 @@ mod tests {
             version = "0.0.1"
         "#;
         std::fs::write(root.path().join("ara.toml"), root_manifest).unwrap();
-        assert!(cmd_install_in(root.path()).is_ok());
+        assert!(cmd_install_in(root.path(), true).is_ok());
     }
 
     #[test]
     fn test_cmd_install_missing_manifest() {
         let root = tempfile::tempdir().unwrap();
-        assert!(cmd_install_in(root.path()).is_err());
+        assert!(cmd_install_in(root.path(), true).is_err());
     }
 
     #[test]
