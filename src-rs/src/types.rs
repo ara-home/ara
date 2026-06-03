@@ -375,6 +375,31 @@ impl fmt::Display for RiskLevel {
 }
 
 // ---------------------------------------------------------------------------
+// Security analysis types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    pub pattern: String,
+    pub severity: RiskLevel,
+    pub location: Option<String>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalysisResult {
+    pub risk_level: RiskLevel,
+    pub findings: Vec<Finding>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifyResult {
+    pub valid: bool,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -1,3 +1,4 @@
+mod analysis;
 mod types;
 mod util;
 

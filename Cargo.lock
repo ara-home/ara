@@ -23,11 +23,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
+ "walkdir",
 ]
 
 [[package]]
