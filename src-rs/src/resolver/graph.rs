@@ -1,6 +1,5 @@
-#![allow(dead_code)]
-
 use crate::types::{SourceType, Version};
+use crate::util::hash;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,15 +31,51 @@ impl Graph {
         self.nodes.iter().position(|n| n.name == name)
     }
 
-    /// Compute a hash for the graph. Currently a stub.
+    /// Compute a hash for the graph from serialized nodes.
     #[must_use]
     pub fn compute_hash(&self) -> [u8; 32] {
-        [0u8; 32]
+        let serialized = serde_json::to_vec(&self.nodes).unwrap_or_default();
+        hash::compute(&serialized)
     }
 
-    /// Check for cycles. Currently a stub.
+    /// Check for cycles using DFS.
     #[must_use]
     pub fn has_cycles(&self) -> bool {
+        let mut visited = vec![false; self.nodes.len()];
+        let mut stack = vec![false; self.nodes.len()];
+
+        fn dfs(
+            nodes: &[Node],
+            v: usize,
+            visited: &mut [bool],
+            stack: &mut [bool],
+        ) -> bool {
+            if stack[v] {
+                return true;
+            }
+            if visited[v] {
+                return false;
+            }
+            visited[v] = true;
+            stack[v] = true;
+
+            for dep in &nodes[v].dependencies {
+                if let Some(idx) = nodes.iter().position(|n| n.name == *dep) {
+                    if dfs(nodes, idx, visited, stack) {
+                        return true;
+                    }
+                }
+            }
+
+            stack[v] = false;
+            false
+        }
+
+        for i in 0..self.nodes.len() {
+            if !visited[i] && dfs(&self.nodes, i, &mut visited, &mut stack) {
+                return true;
+            }
+        }
         false
     }
 }
@@ -81,16 +116,43 @@ mod tests {
     }
 
     #[test]
-    fn test_has_cycles_returns_false() {
+    fn test_has_cycles_empty_graph() {
         let g = Graph::new();
         assert!(!g.has_cycles());
     }
 
     #[test]
-    fn test_compute_hash_returns_zeros() {
-        let g = Graph::new();
+    fn test_has_cycles_detects_cycle() {
+        let mut g = Graph::new();
+        g.add_node(Node {
+            name: "a".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("1.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["b".to_string()],
+        });
+        g.add_node(Node {
+            name: "b".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("1.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["a".to_string()],
+        });
+        assert!(g.has_cycles());
+    }
+
+    #[test]
+    fn test_compute_hash_returns_nonzero_for_nonempty() {
+        let mut g = Graph::new();
+        g.add_node(Node {
+            name: "zod".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("3.23.8").unwrap(),
+            package_hash: None,
+            dependencies: Vec::new(),
+        });
         let hash = g.compute_hash();
         assert_eq!(hash.len(), 32);
-        assert!(hash.iter().all(|&b| b == 0));
+        assert!(hash.iter().any(|&b| b != 0));
     }
 }

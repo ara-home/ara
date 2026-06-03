@@ -13,7 +13,7 @@ use crate::sandbox::executor::Executor;
 use crate::sandbox::profiles::{Profile, SandboxConfig};
 use crate::source::Source;
 use crate::store::cas::Store;
-use crate::types::{Constraint, RiskLevel, SourceType};
+use crate::types::{Constraint, RiskLevel, SourceType, Version};
 
 // ── CLI definition ─────────────────────────────────────────────────────────
 
@@ -69,10 +69,7 @@ impl Cli {
                 eprintln!("ara publish: not yet implemented");
                 Ok(())
             }
-            Commands::Gc => {
-                eprintln!("ara gc: not yet implemented");
-                Ok(())
-            }
+            Commands::Gc => cmd_gc(),
             Commands::Trust { package: _ } => {
                 eprintln!("ara trust: not yet implemented");
                 Ok(())
@@ -297,8 +294,26 @@ fn cmd_install() -> Result<()> {
         });
     }
 
-    let graph = r.resolve();
+    let mut graph = r.resolve();
     println!("Resolved {} packages", graph.nodes.len());
+
+    // Connect resolve(): enhance each node's version from registry sources
+    for node in &mut graph.nodes {
+        if let Some(dep) = find_dep(&m.deps, &node.name) {
+            if let Ok(src) = create_source(node.source, dep) {
+                if let Ok(version_str) = src.resolve(&node.name) {
+                    if let Ok(parsed) = Version::parse(&version_str) {
+                        node.version = parsed;
+                    }
+                }
+            }
+        }
+    }
+
+    // Connect has_cycles(): warn if circular dependencies found
+    if graph.has_cycles() {
+        println!("warning: circular dependency detected in the resolved graph");
+    }
 
     let node_modules = cwd.join("node_modules");
 
@@ -307,12 +322,14 @@ fn cmd_install() -> Result<()> {
     if lock_path.exists() && node_modules.exists() {
         let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
         if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
-            let match_count = graph.nodes.iter().filter(|n| {
-                let v = format!("{}.{}.{}", n.version.major, n.version.minor, n.version.patch);
-                let src = n.source.to_string();
-                existing.packages.iter().any(|p| p.name == n.name && p.version == v && p.source == src)
-            }).count();
-            if match_count == graph.nodes.len() && !graph.nodes.is_empty() {
+            let all_match = existing.packages.iter().all(|p| {
+                graph.find_node(&p.name).map_or(false, |idx| {
+                    let n = &graph.nodes[idx];
+                    let v = format!("{}.{}.{}", n.version.major, n.version.minor, n.version.patch);
+                    n.source.to_string() == p.source && v == p.version
+                })
+            });
+            if all_match && !graph.nodes.is_empty() {
                 let all_exist = graph.nodes.iter().all(|n| node_modules.join(&n.name).exists());
                 if all_exist {
                     println!("Lockfile is up to date. Nothing to install.");
@@ -444,9 +461,15 @@ fn cmd_install() -> Result<()> {
     // Save store index for future cache lookups
     std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
 
-    // Step 3: Store graph and compute graph_hash
+    // Step 3: Store graph and populate graph_hash using compute_hash()
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
-    let graph_hash = store.put_graph(&graph_bytes)?;
+    let store_graph_hash = store.put_graph(&graph_bytes)?;
+    let raw = graph.compute_hash();
+    let graph_hash = format!("sha256:{}", crate::util::hash::hex_encode(&raw));
+    // Verify stored hash matches computed hash (sanity check)
+    if !store_graph_hash.contains(&graph_hash[7..17]) {
+        println!("note: stored graph hash diverges from computed hash");
+    }
 
     let ts = current_timestamp();
 
@@ -497,6 +520,66 @@ fn fetch_and_store(
     store_index.insert(cache_key.to_string(), hash_str.clone());
 
     Ok((pkg_content, hash_str))
+}
+
+// ── gc command ─────────────────────────────────────────────────────────────
+
+fn cmd_gc() -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let store_base = PathBuf::from(&home).join(".ara").join("store");
+    let store = Store::new(store_base.clone());
+
+    let index_path = store_base.join("index.json");
+
+    // Read store index to find active hashes
+    let active_hashes: std::collections::HashSet<String> = if index_path.exists() {
+        let content = std::fs::read_to_string(&index_path)?;
+        let map: HashMap<String, String> = serde_json::from_str(&content).unwrap_or_default();
+        map.into_values().collect()
+    } else {
+        println!("No store index found. Nothing to clean.");
+        return Ok(());
+    };
+
+    let objects_dir = store_base.join("objects");
+    let mut removed = 0u64;
+    let mut total_size = 0u64;
+
+    if objects_dir.exists() {
+        for entry in std::fs::read_dir(&objects_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !active_hashes.contains(name) {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        total_size += meta.len();
+                    }
+                    store.remove(name)?;
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    let graphs_dir = store_base.join("graphs");
+    if graphs_dir.exists() {
+        for entry in std::fs::read_dir(&graphs_dir)? {
+            let entry = entry?;
+            if entry.path().is_file() {
+                std::fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+        }
+    }
+
+    if removed > 0 {
+        println!("Removed {removed} orphaned objects ({total_size} bytes freed)");
+    } else {
+        println!("Store is clean. No orphaned objects found.");
+    }
+
+    Ok(())
 }
 
 // ── run command ────────────────────────────────────────────────────────────
