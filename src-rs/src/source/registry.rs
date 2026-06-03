@@ -8,7 +8,7 @@ pub struct RegistrySource {
 
 impl RegistrySource {
     #[must_use]
-    pub fn new(registry_url: String) -> Self {
+    pub const fn new(registry_url: String) -> Self {
         Self { registry_url }
     }
 

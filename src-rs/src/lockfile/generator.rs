@@ -1,37 +1,39 @@
+use std::fmt::Write;
+
 use crate::lockfile::types::Lockfile;
 
 pub fn generate(lockfile: &Lockfile) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!("version = {}\n\n", lockfile.version));
+    let _ = write!(&mut out, "version = {}\n\n", lockfile.version);
 
     out.push_str("[graph]\n");
-    out.push_str(&format!("resolver = \"{}\"\n", lockfile.graph.resolver));
+    let _ = writeln!(&mut out, "resolver = \"{}\"", lockfile.graph.resolver);
     if let Some(t) = &lockfile.graph.generated_at {
-        out.push_str(&format!("generated_at = \"{t}\"\n"));
+        let _ = writeln!(&mut out, "generated_at = \"{t}\"");
     }
     if let Some(h) = &lockfile.graph.graph_hash {
-        out.push_str(&format!("graph_hash = \"{h}\"\n"));
+        let _ = writeln!(&mut out, "graph_hash = \"{h}\"");
     }
     out.push('\n');
 
     for pkg in &lockfile.packages {
         out.push_str("[[package]]\n");
-        out.push_str(&format!("name = \"{}\"\n", pkg.name));
-        out.push_str(&format!("version = \"{}\"\n", pkg.version));
-        out.push_str(&format!("source = \"{}\"\n", pkg.source));
+        let _ = writeln!(&mut out, "name = \"{}\"", pkg.name);
+        let _ = writeln!(&mut out, "version = \"{}\"", pkg.version);
+        let _ = writeln!(&mut out, "source = \"{}\"", pkg.source);
         if let Some(v) = &pkg.integrity {
-            out.push_str(&format!("integrity = \"{v}\"\n"));
+            let _ = writeln!(&mut out, "integrity = \"{v}\"");
         }
-        out.push_str(&format!("package_hash = \"{}\"\n", pkg.package_hash));
+        let _ = writeln!(&mut out, "package_hash = \"{}\"", pkg.package_hash);
         if let Some(v) = &pkg.signature {
-            out.push_str(&format!("signature = \"{v}\"\n"));
+            let _ = writeln!(&mut out, "signature = \"{v}\"");
         }
         if let Some(v) = &pkg.repository {
-            out.push_str(&format!("repository = \"{v}\"\n"));
+            let _ = writeln!(&mut out, "repository = \"{v}\"");
         }
         if let Some(v) = &pkg.commit {
-            out.push_str(&format!("commit = \"{v}\"\n"));
+            let _ = writeln!(&mut out, "commit = \"{v}\"");
         }
         if let Some(deps) = &pkg.dependencies {
             out.push_str("dependencies = [");
@@ -39,7 +41,7 @@ pub fn generate(lockfile: &Lockfile) -> String {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&format!("\"{dep}\""));
+                let _ = write!(&mut out, "\"{dep}\"");
             }
             out.push_str("]\n");
         }

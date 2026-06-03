@@ -20,7 +20,7 @@ pub struct Resolver {
 
 impl Resolver {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             constraints: Vec::new(),
         }
@@ -82,11 +82,11 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
 
     for c in &pkg_constraints {
         let candidate = match c {
-            Constraint::Exact(v) => v.clone(),
-            Constraint::GreaterOrEqual(v) => v.clone(),
-            Constraint::GreaterThan(v) => v.clone(),
-            Constraint::Caret(v) => v.clone(),
-            Constraint::Tilde(v) => v.clone(),
+            Constraint::Exact(v)
+            | Constraint::GreaterOrEqual(v)
+            | Constraint::GreaterThan(v)
+            | Constraint::Caret(v)
+            | Constraint::Tilde(v) => v.clone(),
             Constraint::LessOrEqual(_) | Constraint::LessThan(_) => continue,
             Constraint::Wildcard(_) => Version::parse("0.0.0").ok()?,
         };

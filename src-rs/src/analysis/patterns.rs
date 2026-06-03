@@ -11,7 +11,7 @@ pub struct Pattern {
 const GLOB: &str = "*.{js,ts,jsx,tsx,mjs,cjs,mts,cts}";
 
 #[allow(clippy::too_many_lines)]
-pub fn all_patterns() -> &'static [Pattern] {
+pub const fn all_patterns() -> &'static [Pattern] {
     &[
         Pattern {
             id: "eval-usage",
@@ -135,7 +135,7 @@ pub fn all_patterns() -> &'static [Pattern] {
     ]
 }
 
-pub fn install_scripts_pattern() -> Pattern {
+pub const fn install_scripts_pattern() -> Pattern {
     Pattern {
         id: "install-scripts",
         severity: RiskLevel::High,

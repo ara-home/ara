@@ -8,10 +8,11 @@ pub struct GithubSource {
 
 impl GithubSource {
     #[must_use]
-    pub fn new(repo: String) -> Self {
+    pub const fn new(repo: String) -> Self {
         Self { repo }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.repo.clone())
     }

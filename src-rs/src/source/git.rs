@@ -10,10 +10,11 @@ pub struct GitSource {
 
 impl GitSource {
     #[must_use]
-    pub fn new(url: String, commit: String) -> Self {
+    pub const fn new(url: String, commit: String) -> Self {
         Self { url, commit }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.commit.clone())
     }

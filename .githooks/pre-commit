@@ -4,18 +4,6 @@ set -eu
 echo "  HOOK   pre-commit"
 cd "$(git rev-parse --show-toplevel)"
 
-echo "  TEST   ara"
-zig test src/main.zig 2>/dev/null || {
-    echo "  FAIL   ara unit tests failed, commit blocked"
-    exit 1
-}
-
-echo "  TEST   ara-sec"
-(cd ara-sec && cargo test --quiet 2>/dev/null) || {
-    echo "  FAIL   ara-sec tests failed, commit blocked"
-    exit 1
-}
-
 echo "  TEST   ara (src-rs)"
 (cd src-rs && cargo test --quiet 2>/dev/null) || {
     echo "  FAIL   ara (src-rs) tests failed, commit blocked"

@@ -196,7 +196,7 @@ pub struct WildcardParts {
 // ---------------------------------------------------------------------------
 
 /// A version constraint (^, ~, >=, <=, >, <, exact, or wildcard).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {
     Exact(Version),
     Caret(Version),
@@ -218,19 +218,22 @@ pub enum ConstraintParseError {
 
 fn split_wildcard(s: &str) -> WildcardParts {
     let dot = s.find('.');
-    let major_str = if let Some(d) = dot { &s[..d] } else { s };
+    let major_str = dot.map_or(s, |d| &s[..d]);
     let major = major_str.parse::<u32>().unwrap_or(0);
 
     let minor = dot.and_then(|d| {
         let rest = &s[d + 1..];
         let second_dot = rest.find('.');
-        if let Some(sd) = second_dot {
-            rest[..sd].parse::<u32>().ok()
-        } else if rest.is_empty() || rest == "x" {
-            None
-        } else {
-            rest.parse::<u32>().ok()
-        }
+        second_dot.map_or_else(
+            || {
+                if rest.is_empty() || rest == "x" {
+                    None
+                } else {
+                    rest.parse::<u32>().ok()
+                }
+            },
+            |sd| rest[..sd].parse::<u32>().ok(),
+        )
     });
 
     WildcardParts { major, minor }
@@ -350,7 +353,7 @@ impl fmt::Display for Constraint {
 // PackageIdentity
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageIdentity {
     pub source: SourceType,
     pub name: String,
@@ -387,7 +390,7 @@ impl fmt::Display for RiskLevel {
 // ---------------------------------------------------------------------------
 
 /// A single security finding discovered during package analysis.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub pattern: String,
     pub severity: RiskLevel,
@@ -396,7 +399,7 @@ pub struct Finding {
 }
 
 /// The result of analyzing a package for security patterns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisResult {
     pub risk_level: RiskLevel,
     pub findings: Vec<Finding>,

@@ -18,7 +18,7 @@ pub struct Graph {
 
 impl Graph {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { nodes: Vec::new() }
     }
 
@@ -41,9 +41,6 @@ impl Graph {
     /// Check for cycles using DFS.
     #[must_use]
     pub fn has_cycles(&self) -> bool {
-        let mut visited = vec![false; self.nodes.len()];
-        let mut stack = vec![false; self.nodes.len()];
-
         fn dfs(
             nodes: &[Node],
             v: usize,
@@ -70,6 +67,9 @@ impl Graph {
             stack[v] = false;
             false
         }
+
+        let mut visited = vec![false; self.nodes.len()];
+        let mut stack = vec![false; self.nodes.len()];
 
         for i in 0..self.nodes.len() {
             if !visited[i] && dfs(&self.nodes, i, &mut visited, &mut stack) {

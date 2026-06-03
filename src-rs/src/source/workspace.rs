@@ -12,10 +12,11 @@ pub struct WorkspaceSource {
 
 impl WorkspaceSource {
     #[must_use]
-    pub fn new(root_path: String) -> Self {
+    pub const fn new(root_path: String) -> Self {
         Self { root_path }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.root_path.clone())
     }

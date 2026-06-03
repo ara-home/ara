@@ -100,7 +100,7 @@ fn severity_label(severity: &str) -> &'static str {
     }
 }
 
-fn print_findings(findings: &[crate::types::Finding], risk_level: &RiskLevel) {
+fn print_findings(findings: &[crate::types::Finding], risk_level: RiskLevel) {
     let reset = "\x1b[0m";
     for f in findings {
         let color = severity_color(&f.severity.to_string());
@@ -111,6 +111,7 @@ fn print_findings(findings: &[crate::types::Finding], risk_level: &RiskLevel) {
     println!("\n  Risk level: {}{}{reset}", severity_color(&risk_level.to_string()), risk_level);
 }
 
+#[allow(clippy::cast_possible_wrap)]
 fn current_timestamp() -> String {
     // Simple ISO 8601 timestamp (UTC)
     let now = std::time::SystemTime::now()
@@ -138,11 +139,11 @@ fn current_timestamp() -> String {
     let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut m = 0usize;
     for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md as i64 {
+        if remaining < i64::from(md) {
             m = i;
             break;
         }
-        remaining -= md as i64;
+        remaining -= i64::from(md);
     }
     let day = remaining + 1;
 
@@ -157,7 +158,7 @@ fn current_timestamp() -> String {
     )
 }
 
-fn is_leap(year: i64) -> bool {
+const fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
@@ -167,7 +168,6 @@ fn find_dep<'a>(deps: &'a [crate::manifest::types::DependencyEntry], name: &str)
 
 fn source_type_from_str(s: &str) -> SourceType {
     match s {
-        "npm" => SourceType::Npm,
         "registry" => SourceType::Registry,
         "github" => SourceType::Github,
         "git" => SourceType::Git,
@@ -225,7 +225,7 @@ fn cmd_analyze(path: &str) -> Result<()> {
             if result.findings.is_empty() {
                 println!("  No suspicious patterns detected.");
             } else {
-                print_findings(&result.findings, &result.risk_level);
+                print_findings(&result.findings, result.risk_level);
             }
         }
         Err(e) => {
@@ -252,7 +252,7 @@ fn cmd_audit(path: &str) -> Result<()> {
             if result.findings.is_empty() {
                 println!("  No suspicious patterns detected.");
             } else {
-                print_findings(&result.findings, &result.risk_level);
+                print_findings(&result.findings, result.risk_level);
             }
             println!("\n  Summary: {summary}");
         }
@@ -270,6 +270,7 @@ fn cmd_install() -> Result<()> {
     cmd_install_in(&cwd)
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
     let manifest_path = cwd.join("ara.toml");
 
@@ -368,12 +369,9 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
     for node in &graph.nodes {
         let ver_str = format!("{}.{}.{}", node.version.major, node.version.minor, node.version.patch);
 
-        let dep = match find_dep(&m.deps, &node.name) {
-            Some(d) => d,
-            None => {
-                println!("  skipped {}: no dependency config", node.name);
-                continue;
-            }
+        let Some(dep) = find_dep(&m.deps, &node.name) else {
+            println!("  skipped {}: no dependency config", node.name);
+            continue;
         };
 
         let src = match create_source(node.source, dep) {
@@ -389,15 +387,12 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
         // Step 2: Check store cache before fetching
         let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
             if store.contains(cached_hash) {
-                match store.get(cached_hash)? {
-                    Some(content) => {
-                        println!("  using cached {}@{}", node.name, ver_str);
-                        (content, cached_hash.clone())
-                    }
-                    None => {
-                        store_index.remove(&cache_key);
-                        fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
-                    }
+                if let Some(content) = store.get(cached_hash)? {
+                    println!("  using cached {}@{}", node.name, ver_str);
+                    (content, cached_hash.clone())
+                } else {
+                    store_index.remove(&cache_key);
+                    fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
                 }
             } else {
                 store_index.remove(&cache_key);
@@ -419,30 +414,27 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
         }
 
         // Step 4: Analyze package and capture security info
-        let security = match analyzer::analyze_package(&pkg_dir) {
-            Ok(result) => {
-                if !result.findings.is_empty() {
-                    let rl = result.risk_level;
-                    let first = &result.findings[0];
-                    let loc = first.location.as_deref().unwrap_or("");
-                    print!("  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                        node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc);
-                    Some(SecurityMeta {
-                        risk_level: Some(rl.to_string()),
-                        analysis_version: Some("1.0.0".to_string()),
-                    })
-                } else {
-                    print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-                    Some(SecurityMeta {
-                        risk_level: Some(result.risk_level.to_string()),
-                        analysis_version: Some("1.0.0".to_string()),
-                    })
-                }
-            }
-            Err(_) => {
+        let security = if let Ok(result) = analyzer::analyze_package(&pkg_dir) {
+            if result.findings.is_empty() {
                 print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-                None
+                Some(SecurityMeta {
+                    risk_level: Some(result.risk_level.to_string()),
+                    analysis_version: Some("1.0.0".to_string()),
+                })
+            } else {
+                let rl = result.risk_level;
+                let first = &result.findings[0];
+                let loc = first.location.as_deref().unwrap_or("");
+                print!("  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
+                    node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc);
+                Some(SecurityMeta {
+                    risk_level: Some(rl.to_string()),
+                    analysis_version: Some("1.0.0".to_string()),
+                })
             }
+        } else {
+            print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+            None
         };
 
         pkg_entries.push(PackageEntry {
@@ -489,8 +481,8 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
 
     let lock_content = crate::lockfile::generator::generate(&lockfile);
     let lock_path = cwd.join("ara.lock");
-    let mut lock_file = std::fs::File::create(&lock_path)?;
-    lock_file.write_all(lock_content.as_bytes())?;
+    let mut lock_f = std::fs::File::create(&lock_path)?;
+    lock_f.write_all(lock_content.as_bytes())?;
     println!("Lockfile written to ara.lock");
 
     Ok(())
@@ -729,7 +721,7 @@ mod tests {
                 description: "eval detected".into(),
             },
         ];
-        print_findings(&findings, &crate::types::RiskLevel::Critical);
+        print_findings(&findings, crate::types::RiskLevel::Critical);
     }
 
     #[test]

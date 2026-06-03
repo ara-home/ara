@@ -127,13 +127,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
         w.members.map(|members| Workspace { members })
     });
 
-    let scripts = match raw.scripts {
-        Some(map) => map
-            .into_iter()
-            .map(|(name, command)| ScriptEntry { name, command })
-            .collect(),
-        None => Vec::new(),
-    };
+    let scripts = raw.scripts.map_or_else(Vec::new, |map| map.into_iter().map(|(name, command)| ScriptEntry { name, command }).collect());
 
     let build = raw.build.map(|b| Build {
         hermetic: b.hermetic,

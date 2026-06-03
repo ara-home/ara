@@ -1,5 +1,5 @@
 //! Static security analysis for npm packages. Scans source files for
-//! suspicious patterns (eval, child_process, credential access, etc.)
+//! suspicious patterns (eval, `child_process`, credential access, etc.)
 //! and reports findings with severity levels.
 
 use std::collections::HashSet;

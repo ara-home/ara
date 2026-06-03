@@ -12,10 +12,11 @@ pub struct LocalSource {
 
 impl LocalSource {
     #[must_use]
-    pub fn new(path: String) -> Self {
+    pub const fn new(path: String) -> Self {
         Self { path }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.path.clone())
     }

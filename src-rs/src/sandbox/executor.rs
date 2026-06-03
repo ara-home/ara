@@ -19,7 +19,7 @@ pub struct Executor {
 
 impl Executor {
     #[must_use]
-    pub fn new(config: SandboxConfig) -> Self {
+    pub const fn new(config: SandboxConfig) -> Self {
         Self { config }
     }
 
@@ -372,6 +372,7 @@ const RESTRICTED_SYSCALLS: &[i32] = &[
     sys::PERSONALITY,
 ];
 
+#[allow(clippy::cast_sign_loss)]
 fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
     let mut filters = Vec::with_capacity(allowed.len() + 3);
 
@@ -418,6 +419,7 @@ fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_truncation)]
 fn apply_seccomp(profile: Profile) -> Result<(), std::io::Error> {
     let allowed = match profile {
         Profile::Hermetic => HERMETIC_SYSCALLS,
@@ -436,7 +438,7 @@ fn apply_seccomp(profile: Profile) -> Result<(), std::io::Error> {
         libc::prctl(
             PR_SET_SECCOMP,
             SECCOMP_MODE_FILTER,
-            &prog as *const sock_fprog,
+            &raw const prog,
         )
     };
 

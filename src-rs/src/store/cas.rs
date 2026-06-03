@@ -21,7 +21,7 @@ pub struct Store {
 
 impl Store {
     #[must_use]
-    pub fn new(base_path: PathBuf) -> Self {
+    pub const fn new(base_path: PathBuf) -> Self {
         Self { base_path }
     }
 
