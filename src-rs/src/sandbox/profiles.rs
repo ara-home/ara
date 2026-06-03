@@ -28,71 +28,31 @@ impl FromStr for Profile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FilesystemAccess {
     pub allowed_paths: Vec<String>,
     pub writable_paths: Vec<String>,
 }
 
-impl Default for FilesystemAccess {
-    fn default() -> Self {
-        Self {
-            allowed_paths: Vec::new(),
-            writable_paths: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NetworkAccess {
     pub enabled: bool,
     pub allowed_hosts: Vec<String>,
 }
 
-impl Default for NetworkAccess {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            allowed_hosts: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvironmentAccess {
     pub allowed_vars: Vec<String>,
 }
 
-impl Default for EnvironmentAccess {
-    fn default() -> Self {
-        Self {
-            allowed_vars: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProcessAccess {
     pub allow_spawn: bool,
 }
 
-impl Default for ProcessAccess {
-    fn default() -> Self {
-        Self { allow_spawn: false }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClockAccess {
     pub deterministic: bool,
-}
-
-impl Default for ClockAccess {
-    fn default() -> Self {
-        Self {
-            deterministic: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +121,7 @@ impl SandboxConfig {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]

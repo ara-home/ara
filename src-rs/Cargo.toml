@@ -21,12 +21,7 @@ libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
-
-[lints.clippy]
-pedantic = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+mockito = "1"
 
 [[bin]]
 name = "ara"

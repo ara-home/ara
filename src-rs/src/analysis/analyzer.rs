@@ -1,3 +1,7 @@
+//! Static security analysis for npm packages. Scans source files for
+//! suspicious patterns (eval, child_process, credential access, etc.)
+//! and reports findings with severity levels.
+
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -135,6 +139,7 @@ pub fn analyze_package(package_path: &Path) -> Result<AnalysisResult> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use std::fs;
     use std::io::Write;

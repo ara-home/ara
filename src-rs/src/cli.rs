@@ -267,6 +267,10 @@ fn cmd_audit(path: &str) -> Result<()> {
 
 fn cmd_install() -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
+    cmd_install_in(&cwd)
+}
+
+fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
     let manifest_path = cwd.join("ara.toml");
 
     let content = std::fs::read_to_string(&manifest_path)
@@ -323,7 +327,7 @@ fn cmd_install() -> Result<()> {
         let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
         if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
             let all_match = existing.packages.iter().all(|p| {
-                graph.find_node(&p.name).map_or(false, |idx| {
+                graph.find_node(&p.name).is_some_and(|idx| {
                     let n = &graph.nodes[idx];
                     let v = format!("{}.{}.{}", n.version.major, n.version.minor, n.version.patch);
                     n.source.to_string() == p.source && v == p.version
@@ -527,7 +531,11 @@ fn fetch_and_store(
 fn cmd_gc() -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let store_base = PathBuf::from(&home).join(".ara").join("store");
-    let store = Store::new(store_base.clone());
+    cmd_gc_in(&store_base)
+}
+
+fn cmd_gc_in(store_base: &std::path::Path) -> Result<()> {
+    let store = Store::new(store_base.to_path_buf());
 
     let index_path = store_base.join("index.json");
 
@@ -590,4 +598,225 @@ fn cmd_run(script: &str) -> Result<()> {
     let executor = Executor::new(config);
     executor.execute(script)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn test_is_leap() {
+        assert!(is_leap(2000));
+        assert!(!is_leap(1900));
+        assert!(is_leap(2024));
+        assert!(!is_leap(2023));
+        assert!(!is_leap(1970));
+        assert!(is_leap(2004));
+    }
+
+    #[test]
+    fn test_current_timestamp_format() {
+        let ts = current_timestamp();
+        assert_eq!(ts.len(), 20, "expected ISO 8601 length, got: {ts}");
+        assert_eq!(&ts[4..5], "-", "expected - after year: {ts}");
+        assert_eq!(&ts[7..8], "-", "expected - after month: {ts}");
+        assert_eq!(&ts[10..11], "T", "expected T separator: {ts}");
+        assert_eq!(&ts[13..14], ":", "expected : after hour: {ts}");
+        assert_eq!(&ts[16..17], ":", "expected : after minute: {ts}");
+        assert_eq!(&ts[19..20], "Z", "expected Z suffix: {ts}");
+    }
+
+    #[test]
+    fn test_current_timestamp_parses_as_date() {
+        let ts = current_timestamp();
+        let year: i64 = ts[0..4].parse().unwrap();
+        let month: u32 = ts[5..7].parse().unwrap();
+        let day: u32 = ts[8..10].parse().unwrap();
+        assert!(year >= 2024, "year should be >= 2024, got {year}");
+        assert!((1..=12).contains(&month), "month out of range: {month}");
+        assert!((1..=31).contains(&day), "day out of range: {day}");
+    }
+
+    #[test]
+    fn test_source_type_from_str() {
+        assert_eq!(source_type_from_str("npm"), SourceType::Npm);
+        assert_eq!(source_type_from_str("registry"), SourceType::Registry);
+        assert_eq!(source_type_from_str("github"), SourceType::Github);
+        assert_eq!(source_type_from_str("git"), SourceType::Git);
+        assert_eq!(source_type_from_str("local"), SourceType::Local);
+        assert_eq!(source_type_from_str("workspace"), SourceType::Workspace);
+        assert_eq!(source_type_from_str("foo"), SourceType::Npm);
+        assert_eq!(source_type_from_str(""), SourceType::Npm);
+    }
+
+    #[test]
+    fn test_find_dep() {
+        let deps = vec![
+            crate::manifest::types::DependencyEntry {
+                name: "zod".into(),
+                source: "npm".into(),
+                version: Some("^3.0.0".into()),
+                repo: None,
+                url: None,
+                commit: None,
+                path: None,
+                package: None,
+            },
+            crate::manifest::types::DependencyEntry {
+                name: "react".into(),
+                source: "npm".into(),
+                version: Some("^18.0.0".into()),
+                repo: None,
+                url: None,
+                commit: None,
+                path: None,
+                package: None,
+            },
+        ];
+        assert!(find_dep(&deps, "zod").is_some());
+        assert!(find_dep(&deps, "react").is_some());
+        assert!(find_dep(&deps, "missing").is_none());
+    }
+
+    #[test]
+    fn test_extract_tarball() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("hello.txt").unwrap();
+        header.set_size(12);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"hello world\n".as_slice()).unwrap();
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        extract_tarball(&buf, &dest).unwrap();
+        let extracted = std::fs::read_to_string(dest.join("hello.txt")).unwrap();
+        assert_eq!(extracted, "hello world\n");
+    }
+
+    #[test]
+    fn test_severity_color() {
+        assert_eq!(severity_color("critical"), "\x1b[31m");
+        assert_eq!(severity_color("high"), "\x1b[33m");
+        assert_eq!(severity_color("medium"), "\x1b[36m");
+        assert_eq!(severity_color("low"), "\x1b[32m");
+        assert_eq!(severity_color("unknown"), "\x1b[0m");
+    }
+
+    #[test]
+    fn test_severity_label() {
+        assert_eq!(severity_label("critical"), "CRITICAL");
+        assert_eq!(severity_label("high"), "HIGH");
+        assert_eq!(severity_label("medium"), "MEDIUM");
+        assert_eq!(severity_label("low"), "LOW");
+        assert_eq!(severity_label("unknown"), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_print_findings_does_not_crash() {
+        let findings = vec![
+            crate::types::Finding {
+                pattern: "eval-usage".into(),
+                severity: crate::types::RiskLevel::Critical,
+                location: Some("index.js:1".into()),
+                description: "eval detected".into(),
+            },
+        ];
+        print_findings(&findings, &crate::types::RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_cmd_install_local_dep() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+
+        let dep_dir = root_path.join("dep-a");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        let dep_manifest = r#"
+            [project]
+            name = "dep-a"
+            version = "0.1.0"
+        "#;
+        std::fs::write(dep_dir.join("ara.toml"), dep_manifest).unwrap();
+        std::fs::write(dep_dir.join("index.js"), "module.exports = {};").unwrap();
+
+        let root_manifest = format!(
+            r#"
+            [project]
+            name = "my-app"
+            version = "1.0.0"
+
+            [deps]
+            dep-a = {{ source = "local", version = "0.1.0", path = "{}" }}
+            "#,
+            dep_dir.display()
+        );
+        std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
+
+        cmd_install_in(&root_path).unwrap();
+
+        assert!(root_path.join("node_modules").exists());
+        assert!(root_path.join("node_modules/dep-a").exists());
+        assert!(root_path.join("node_modules/dep-a/index.js").exists());
+        assert!(root_path.join("ara.lock").exists());
+
+        let lock_content = std::fs::read_to_string(root_path.join("ara.lock")).unwrap();
+        let lf = crate::lockfile::parser::parse(&lock_content).unwrap();
+        assert!(!lf.packages.is_empty());
+        assert_eq!(lf.packages[0].name, "dep-a");
+    }
+
+    #[test]
+    fn test_cmd_install_no_deps() {
+        let root = tempfile::tempdir().unwrap();
+        let root_manifest = r#"
+            [project]
+            name = "empty"
+            version = "0.0.1"
+        "#;
+        std::fs::write(root.path().join("ara.toml"), root_manifest).unwrap();
+        assert!(cmd_install_in(root.path()).is_ok());
+    }
+
+    #[test]
+    fn test_cmd_install_missing_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(cmd_install_in(root.path()).is_err());
+    }
+
+    #[test]
+    fn test_cmd_gc_clean_store() {
+        let store_base = tempfile::tempdir().unwrap();
+        let objects = store_base.path().join("objects");
+        let graphs = store_base.path().join("graphs");
+        std::fs::create_dir_all(&objects).unwrap();
+        std::fs::create_dir_all(&graphs).unwrap();
+
+        let mut index = std::collections::HashMap::new();
+        index.insert("test-pkg@1.0.0".to_string(), "sha256-active".to_string());
+        std::fs::write(store_base.path().join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+
+        std::fs::write(objects.join("sha256-active"), b"content").unwrap();
+        std::fs::write(objects.join("sha256-orphan"), b"orphan").unwrap();
+
+        cmd_gc_in(store_base.path()).unwrap();
+
+        assert!(objects.join("sha256-active").exists());
+        assert!(!objects.join("sha256-orphan").exists());
+    }
+
+    #[test]
+    fn test_cmd_gc_no_index() {
+        let store_base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store_base.path().join("objects")).unwrap();
+        std::fs::write(store_base.path().join("objects").join("some-hash"), b"data").unwrap();
+        cmd_gc_in(store_base.path()).unwrap();
+    }
 }

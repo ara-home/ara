@@ -1,3 +1,6 @@
+//! Package source implementations: local directories, workspace members,
+//! git repositories, GitHub archives, and npm/registry tarballs.
+
 #![allow(dead_code)]
 
 pub mod git;

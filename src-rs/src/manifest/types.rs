@@ -70,3 +70,95 @@ pub struct Manifest {
     pub security: Option<Security>,
     pub build: Option<Build>,
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn test_project_creation() {
+        let p = Project {
+            name: "test".into(),
+            version: "0.1.0".into(),
+            description: Some("desc".into()),
+            license: None,
+            repository: None,
+            homepage: None,
+        };
+        assert_eq!(p.name, "test");
+        assert_eq!(p.version, "0.1.0");
+    }
+
+    #[test]
+    fn test_dependency_entry_creation() {
+        let d = DependencyEntry {
+            name: "zod".into(),
+            source: "npm".into(),
+            version: Some("^3.0.0".into()),
+            repo: None,
+            url: None,
+            commit: None,
+            path: None,
+            package: None,
+        };
+        assert_eq!(d.name, "zod");
+        assert_eq!(d.version.as_deref(), Some("^3.0.0"));
+    }
+
+    #[test]
+    fn test_manifest_with_all_sections() {
+        let m = Manifest {
+            project: Project {
+                name: "app".into(),
+                version: "1.0.0".into(),
+                description: None,
+                license: None,
+                repository: None,
+                homepage: None,
+            },
+            deps: vec![DependencyEntry {
+                name: "react".into(),
+                source: "npm".into(),
+                version: Some("^18.0.0".into()),
+                repo: None,
+                url: None,
+                commit: None,
+                path: None,
+                package: None,
+            }],
+            workspace: Some(Workspace { members: vec!["apps/*".into()] }),
+            scripts: vec![ScriptEntry { name: "build".into(), command: "tsc".into() }],
+            security: Some(Security {
+                risk_threshold: Some("high".into()),
+                require_review: Some(true),
+                allow_lifecycle_scripts: None,
+                block_critical: None,
+            }),
+            build: Some(Build {
+                hermetic: Some(true),
+                offline_first: None,
+            }),
+        };
+        assert_eq!(m.project.name, "app");
+        assert_eq!(m.deps.len(), 1);
+        assert_eq!(m.workspace.as_ref().unwrap().members.len(), 1);
+        assert_eq!(m.scripts.len(), 1);
+        assert_eq!(m.security.as_ref().unwrap().risk_threshold.as_deref(), Some("high"));
+        assert!(m.build.as_ref().unwrap().hermetic.unwrap());
+    }
+
+    #[test]
+    fn test_security_default() {
+        let s = Security::default();
+        assert!(s.risk_threshold.is_none());
+        assert!(s.require_review.is_none());
+    }
+
+    #[test]
+    fn test_build_default() {
+        let b = Build::default();
+        assert!(b.hermetic.is_none());
+        assert!(b.offline_first.is_none());
+    }
+}

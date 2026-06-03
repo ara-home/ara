@@ -34,6 +34,7 @@ impl WorkspaceSource {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::types::{SourceType, Version};
     use std::io::Write;

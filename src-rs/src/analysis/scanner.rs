@@ -98,6 +98,7 @@ pub fn scan_package(package_path: &Path) -> Result<Vec<ScannedFile>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use std::fs;
     use std::io::Write;
@@ -214,5 +215,45 @@ mod tests {
         write_file(dir.path(), "file.js", "content");
         let result = scan_package(&dir.path().join("file.js"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_scanner_ignores_cache_svn_hg() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "src/index.js", "ok");
+        write_file(dir.path(), ".cache/foo.js", "cached");
+        write_file(dir.path(), ".svn/bar.js", "svn");
+        write_file(dir.path(), ".hg/baz.js", "hg");
+        write_file(dir.path(), "__pycache__/qux.js", "pyc");
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(paths, vec!["index.js"]);
+    }
+
+    #[test]
+    fn test_scanner_ignores_next_dir() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "index.js", "ok");
+        write_file(dir.path(), ".next/bundle.js", "bundled");
+
+        let files = scan_package(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_scanner_finds_mjs_cjs() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "module.mjs", "export const x = 1;");
+        write_file(dir.path(), "module.cjs", "module.exports = {};");
+        write_file(dir.path(), "module.mts", "export const y: number = 2;");
+        write_file(dir.path(), "module.cts", "module.exports = {};");
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        assert!(paths.contains(&"module.mjs"));
+        assert!(paths.contains(&"module.cjs"));
+        assert!(paths.contains(&"module.mts"));
+        assert!(paths.contains(&"module.cts"));
     }
 }

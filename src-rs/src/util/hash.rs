@@ -1,14 +1,17 @@
+/// Compute a SHA-256 hash of the given bytes.
 pub fn compute(bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(bytes).into()
 }
 
+/// Encode a 32-byte hash as a lowercase hex string.
 pub fn hex_encode(hash: &[u8; 32]) -> String {
     hex::encode(hash)
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]

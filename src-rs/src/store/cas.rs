@@ -1,3 +1,6 @@
+//! Content-addressable store for caching package tarballs and dependency graphs.
+//! Objects are stored as `sha256-<hex>` under `objects/`, and graphs under `graphs/`.
+
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -105,6 +108,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use tempfile::TempDir;
 
@@ -155,5 +159,33 @@ mod tests {
         let (_dir, store) = setup();
         let data = store.get("sha256-nonexistent").unwrap();
         assert!(data.is_none());
+    }
+
+    #[test]
+    fn test_get_rejects_null_byte() {
+        let (_dir, store) = setup();
+        let err = store.get("sha256-\0invalid").unwrap_err();
+        assert!(matches!(err, StoreError::NullByte));
+    }
+
+    #[test]
+    fn test_contains_rejects_null_byte() {
+        let (_dir, store) = setup();
+        assert!(!store.contains("sha256-\0invalid"));
+    }
+
+    #[test]
+    fn test_remove_rejects_null_byte() {
+        let (_dir, store) = setup();
+        let err = store.remove("sha256-\0invalid").unwrap_err();
+        assert!(matches!(err, StoreError::NullByte));
+    }
+
+    #[test]
+    fn test_remove_nonexistent() {
+        let (_dir, store) = setup();
+        let err = store.remove("sha256-nonexistent-hash");
+        // remove on non-existent file should fail with Io error
+        assert!(err.is_err());
     }
 }

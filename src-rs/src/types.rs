@@ -1,3 +1,6 @@
+//! Core types for the ara package manager: versions, constraints, source types,
+//! risk levels, and security analysis results.
+
 use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
@@ -6,6 +9,7 @@ use std::str::FromStr;
 // SourceType
 // ---------------------------------------------------------------------------
 
+/// The origin of a package dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceType {
     Workspace,
@@ -53,6 +57,7 @@ impl FromStr for SourceType {
 // Version
 // ---------------------------------------------------------------------------
 
+/// A semantic version (major.minor.patch) with optional prerelease and build metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Version {
     pub major: u32,
@@ -190,6 +195,7 @@ pub struct WildcardParts {
 // Constraint
 // ---------------------------------------------------------------------------
 
+/// A version constraint (^, ~, >=, <=, >, <, exact, or wildcard).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
     Exact(Version),
@@ -356,6 +362,7 @@ pub struct PackageIdentity {
 // RiskLevel
 // ---------------------------------------------------------------------------
 
+/// Severity level for a security finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiskLevel {
     Low,
@@ -379,6 +386,7 @@ impl fmt::Display for RiskLevel {
 // Security analysis types
 // ---------------------------------------------------------------------------
 
+/// A single security finding discovered during package analysis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
     pub pattern: String,
@@ -387,6 +395,7 @@ pub struct Finding {
     pub description: String,
 }
 
+/// The result of analyzing a package for security patterns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalysisResult {
     pub risk_level: RiskLevel,
@@ -406,6 +415,7 @@ pub struct VerifyResult {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     // ---- Version ----

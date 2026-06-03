@@ -1,3 +1,7 @@
+//! Sandboxed command execution with Linux seccomp-BPF filters.
+//! Supports three profiles: Hermetic (minimal syscalls), Restricted (safe syscalls),
+//! and Open (no restrictions).
+
 #![allow(dead_code)]
 
 use std::os::unix::process::CommandExt;
@@ -36,8 +40,7 @@ impl Executor {
         let status = child.wait()?;
 
         if !status.success() {
-            return Err(ExecutorError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(ExecutorError::Io(std::io::Error::other(
                 format!("command exited with: {status}"),
             )));
         }
@@ -453,6 +456,7 @@ fn apply_seccomp(_profile: Profile) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]

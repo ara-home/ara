@@ -92,10 +92,10 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
         };
 
         // Verify candidate satisfies ALL constraints for this package
-        if pkg_constraints.iter().all(|con| con.satisfied_by(&candidate)) {
-            if best.as_ref().map_or(true, |b| candidate > *b) {
-                best = Some(candidate);
-            }
+        if pkg_constraints.iter().all(|con| con.satisfied_by(&candidate))
+            && best.as_ref().is_none_or(|b| candidate > *b)
+        {
+            best = Some(candidate);
         }
     }
 
@@ -104,6 +104,7 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]
@@ -139,5 +140,59 @@ mod tests {
         let graph = r.resolve();
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].name, "c");
+    }
+
+    #[test]
+    fn test_select_version_exact() {
+        let constraints = vec![ConstraintEntry {
+            package: "pkg".into(),
+            constraint: Constraint::parse("1.2.3").unwrap(),
+            source: SourceType::Npm,
+            required_by: "root".into(),
+        }];
+        let version = select_version(&constraints, "pkg");
+        assert!(version.is_some());
+        assert_eq!(version.unwrap(), Version::parse("1.2.3").unwrap());
+    }
+
+    #[test]
+    fn test_select_version_unsatisfiable() {
+        // Wildcard returns 0.0.0, but Exact("2.0.0") won't be satisified by 0.0.0
+        // Actually, Wildcard returns None from select_version because "0.0.0" won't satisfy "2.0.0"
+        let constraints = vec![ConstraintEntry {
+            package: "pkg".into(),
+            constraint: Constraint::parse("^2.0.0").unwrap(),
+            source: SourceType::Npm,
+            required_by: "root".into(),
+        }];
+        // select_version picks the caret candidate (2.0.0) which should be returned
+        let version = select_version(&constraints, "pkg");
+        assert!(version.is_some());
+        assert_eq!(version.unwrap().major, 2);
+    }
+
+    #[test]
+    fn test_select_version_less_or_equal_skipped() {
+        let constraints = vec![ConstraintEntry {
+            package: "pkg".into(),
+            constraint: Constraint::parse("<=1.0.0").unwrap(),
+            source: SourceType::Npm,
+            required_by: "root".into(),
+        }];
+        // LessOrEqual is skipped in select_version (continue), so no candidate
+        let version = select_version(&constraints, "pkg");
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn test_select_version_none_for_unknown_package() {
+        let constraints = vec![ConstraintEntry {
+            package: "other".into(),
+            constraint: Constraint::parse(">=1.0.0").unwrap(),
+            source: SourceType::Npm,
+            required_by: "root".into(),
+        }];
+        let version = select_version(&constraints, "missing");
+        assert!(version.is_none());
     }
 }

@@ -16,4 +16,16 @@ echo "  TEST   ara-sec"
     exit 1
 }
 
+echo "  TEST   ara (src-rs)"
+(cd src-rs && cargo test --quiet 2>/dev/null) || {
+    echo "  FAIL   ara (src-rs) tests failed, commit blocked"
+    exit 1
+}
+
+echo "  LINT   ara (src-rs)"
+(cd src-rs && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null) || {
+    echo "  FAIL   ara (src-rs) clippy failed, commit blocked"
+    exit 1
+}
+
 echo "  PASS   all checks"

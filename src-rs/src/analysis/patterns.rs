@@ -147,6 +147,7 @@ pub fn install_scripts_pattern() -> Pattern {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     struct PatternCase {
