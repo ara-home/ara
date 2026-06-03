@@ -260,7 +260,7 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         let components: Vec<_> = path.components().collect();
         let stripped = if components
             .first()
-            .map_or(false, |c| c.as_os_str() == "package")
+            .is_some_and(|c| c.as_os_str() == "package")
         {
             components.iter().skip(1).collect::<PathBuf>()
         } else {
