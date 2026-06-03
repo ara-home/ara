@@ -1,129 +1,23 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 
 use crate::analysis::analyzer;
 use crate::lockfile::types::{GraphMeta, Lockfile, PackageEntry, SecurityMeta};
 use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
-use crate::sandbox::executor::Executor;
-use crate::sandbox::profiles::{Profile, SandboxConfig};
 use crate::source::Source;
 use crate::store::cas::Store;
-use crate::types::{Constraint, RiskLevel, SourceType, Version};
+use crate::types::{Constraint, SourceType, Version};
 
-// ── CLI definition ─────────────────────────────────────────────────────────
+use super::prompt::{AllowDecision, prompt_allow_package};
 
-#[derive(Parser)]
-#[command(name = "ara", version, about = "Ara package manager")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
-}
-
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Install project dependencies
-    Install {
-        #[arg(long)]
-        non_interactive: bool,
-    },
-    /// Run a script in a sandboxed environment
-    Run {
-        script: String,
-        #[arg(long, default_value = "runtime")]
-        profile: String,
-    },
-    /// Analyze a package for security patterns
-    Analyze {
-        #[arg(default_value = ".")]
-        path: String,
-    },
-    /// Full security audit of a package
-    Audit {
-        #[arg(default_value = ".")]
-        path: String,
-    },
-    /// Build the project (not yet implemented)
-    Build,
-    /// Publish the project (not yet implemented)
-    Publish,
-    /// Run garbage collection on the store (not yet implemented)
-    Gc,
-    /// Trust a package (not yet implemented)
-    Trust { package: String },
-}
-
-impl Cli {
-    pub fn run(&self) -> Result<()> {
-        match &self.command {
-            Commands::Install { non_interactive } => cmd_install(*non_interactive),
-            Commands::Run { script, profile } => cmd_run(script, profile),
-            Commands::Analyze { path } => cmd_analyze(path),
-            Commands::Audit { path } => cmd_audit(path),
-            Commands::Build => {
-                eprintln!("ara build: not yet implemented");
-                Ok(())
-            }
-            Commands::Publish => {
-                eprintln!("ara publish: not yet implemented");
-                Ok(())
-            }
-            Commands::Gc => cmd_gc(),
-            Commands::Trust { package: _ } => {
-                eprintln!("ara trust: not yet implemented");
-                Ok(())
-            }
-        }
-    }
-}
-
-// ── helpers ────────────────────────────────────────────────────────────────
-
-fn severity_color(severity: &str) -> &'static str {
-    match severity {
-        "critical" => "\x1b[31m",
-        "high" => "\x1b[33m",
-        "medium" => "\x1b[36m",
-        "low" => "\x1b[32m",
-        _ => "\x1b[0m",
-    }
-}
-
-fn severity_label(severity: &str) -> &'static str {
-    match severity {
-        "critical" => "CRITICAL",
-        "high" => "HIGH",
-        "medium" => "MEDIUM",
-        "low" => "LOW",
-        _ => "UNKNOWN",
-    }
-}
-
-fn print_findings(findings: &[crate::types::Finding], risk_level: RiskLevel) {
-    let reset = "\x1b[0m";
-    for f in findings {
-        let color = severity_color(&f.severity.to_string());
-        let label = severity_label(&f.severity.to_string());
-        let location = f.location.as_deref().unwrap_or("-");
-        println!(
-            "  {color}{label:>8}{reset}  {:<20}  {:<25}  {}",
-            f.pattern, location, f.description
-        );
-    }
-    println!(
-        "\n  Risk level: {}{}{reset}",
-        severity_color(&risk_level.to_string()),
-        risk_level
-    );
-}
+// ── helpers ────────────────────────────────────────────────────────────
 
 #[allow(clippy::cast_possible_wrap)]
 fn current_timestamp() -> String {
-    // Simple ISO 8601 timestamp (UTC)
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -134,7 +28,6 @@ fn current_timestamp() -> String {
     let minutes = (time_secs % 3600) / 60;
     let seconds = time_secs % 60;
 
-    // Simple calendar calculation (for dates after 1970)
     let mut y = 1970i64;
     let mut remaining = days as i64;
     loop {
@@ -364,114 +257,15 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── analyze command ────────────────────────────────────────────────────────
+// ── install command ────────────────────────────────────────────────────
 
-fn cmd_analyze(path: &str) -> Result<()> {
-    let abs_path = std::fs::canonicalize(path).context("invalid path")?;
-    println!("Analyzing {}...\n", abs_path.display());
-
-    match analyzer::analyze_package(&abs_path) {
-        Ok(result) => {
-            if result.findings.is_empty() {
-                println!("  No suspicious patterns detected.");
-            } else {
-                print_findings(&result.findings, result.risk_level);
-            }
-        }
-        Err(e) => {
-            eprintln!("  Analysis failed: {e}");
-        }
-    }
-    Ok(())
-}
-
-// ── audit command ──────────────────────────────────────────────────────────
-
-fn cmd_audit(path: &str) -> Result<()> {
-    let abs_path = std::fs::canonicalize(path).context("invalid path")?;
-    println!("Auditing {}...\n", abs_path.display());
-
-    match analyzer::analyze_package(&abs_path) {
-        Ok(result) => {
-            let summary = if result.findings.is_empty() {
-                "No issues found.".to_string()
-            } else {
-                format!("Found {} potential issue(s).", result.findings.len())
-            };
-
-            if result.findings.is_empty() {
-                println!("  No suspicious patterns detected.");
-            } else {
-                print_findings(&result.findings, result.risk_level);
-            }
-            println!("\n  Summary: {summary}");
-        }
-        Err(e) => {
-            eprintln!("  Audit failed: {e}");
-        }
-    }
-    Ok(())
-}
-
-// ── interactive prompt ─────────────────────────────────────────────────
-
-enum AllowDecision {
-    Yes,
-    No,
-    Sandbox,
-}
-
-fn prompt_allow_package(
-    name: &str,
-    version: &str,
-    findings: &[crate::types::Finding],
-) -> AllowDecision {
-    println!("\n  ⚠  {name}@{version} wants to:");
-    let reset = "\x1b[0m";
-    for f in findings {
-        let color = severity_color(&f.severity.to_string());
-        let label = severity_label(&f.severity.to_string());
-        println!("  {color}· {:<30} [{label}]{reset}  {}", f.description, f.pattern);
-    }
-
-    loop {
-        print!("\n  Allow? (yes / no / sandbox / inspect) ");
-        let _ = io::stdout().flush();
-
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            return AllowDecision::No;
-        }
-
-        match input.trim().to_lowercase().as_str() {
-            "yes" | "y" => return AllowDecision::Yes,
-            "no" | "n" => return AllowDecision::No,
-            "sandbox" | "s" => return AllowDecision::Sandbox,
-            "inspect" | "i" => {
-                let risk = findings
-                    .iter()
-                    .map(|f| f.severity)
-                    .max()
-                    .unwrap_or(crate::types::RiskLevel::Low);
-                print_findings(findings, risk);
-                // loop continues
-            }
-            _ => {
-                println!("  Invalid option. Please type yes, no, sandbox, or inspect.");
-            }
-        }
-    }
-}
-
-// ── install command ────────────────────────────────────────────────────────
-
-fn cmd_install(non_interactive: bool) -> Result<()> {
+pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_install_in(cwd: &std::path::Path, non_interactive: bool) -> Result<()> {
+fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let manifest_path = cwd.join("ara.toml");
 
     let content = std::fs::read_to_string(&manifest_path)
@@ -775,83 +569,6 @@ fn fetch_and_store(
     Ok((pkg_content, hash_str))
 }
 
-// ── gc command ─────────────────────────────────────────────────────────────
-
-fn cmd_gc() -> Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let store_base = PathBuf::from(&home).join(".ara").join("store");
-    cmd_gc_in(&store_base)
-}
-
-fn cmd_gc_in(store_base: &std::path::Path) -> Result<()> {
-    let store = Store::new(store_base.to_path_buf());
-
-    let index_path = store_base.join("index.json");
-
-    // Read store index to find active hashes
-    let active_hashes: std::collections::HashSet<String> = if index_path.exists() {
-        let content = std::fs::read_to_string(&index_path)?;
-        let map: HashMap<String, String> = serde_json::from_str(&content).unwrap_or_default();
-        map.into_values().collect()
-    } else {
-        println!("No store index found. Nothing to clean.");
-        return Ok(());
-    };
-
-    let objects_dir = store_base.join("objects");
-    let mut removed = 0u64;
-    let mut total_size = 0u64;
-
-    if objects_dir.exists() {
-        for entry in std::fs::read_dir(&objects_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !active_hashes.contains(name) {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        total_size += meta.len();
-                    }
-                    store.remove(name)?;
-                    removed += 1;
-                }
-            }
-        }
-    }
-
-    let graphs_dir = store_base.join("graphs");
-    if graphs_dir.exists() {
-        for entry in std::fs::read_dir(&graphs_dir)? {
-            let entry = entry?;
-            if entry.path().is_file() {
-                std::fs::remove_file(entry.path())?;
-                removed += 1;
-            }
-        }
-    }
-
-    if removed > 0 {
-        println!("Removed {removed} orphaned objects ({total_size} bytes freed)");
-    } else {
-        println!("Store is clean. No orphaned objects found.");
-    }
-
-    Ok(())
-}
-
-// ── run command ────────────────────────────────────────────────────────────
-
-fn cmd_run(script: &str, profile: &str) -> Result<()> {
-    let profile: Profile = profile
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid profile: {e}"))?;
-    println!("running: {script} ({profile:?})");
-    let config = SandboxConfig::for_profile(profile);
-    let executor = Executor::new(config);
-    executor.execute(script)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -954,35 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn test_severity_color() {
-        assert_eq!(severity_color("critical"), "\x1b[31m");
-        assert_eq!(severity_color("high"), "\x1b[33m");
-        assert_eq!(severity_color("medium"), "\x1b[36m");
-        assert_eq!(severity_color("low"), "\x1b[32m");
-        assert_eq!(severity_color("unknown"), "\x1b[0m");
-    }
-
-    #[test]
-    fn test_severity_label() {
-        assert_eq!(severity_label("critical"), "CRITICAL");
-        assert_eq!(severity_label("high"), "HIGH");
-        assert_eq!(severity_label("medium"), "MEDIUM");
-        assert_eq!(severity_label("low"), "LOW");
-        assert_eq!(severity_label("unknown"), "UNKNOWN");
-    }
-
-    #[test]
-    fn test_print_findings_does_not_crash() {
-        let findings = vec![crate::types::Finding {
-            pattern: "eval-usage".into(),
-            severity: crate::types::RiskLevel::Critical,
-            location: Some("index.js:1".into()),
-            description: "eval detected".into(),
-        }];
-        print_findings(&findings, crate::types::RiskLevel::Critical);
-    }
-
-    #[test]
     fn test_cmd_install_local_dep() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
@@ -1039,38 +727,5 @@ mod tests {
     fn test_cmd_install_missing_manifest() {
         let root = tempfile::tempdir().unwrap();
         assert!(cmd_install_in(root.path(), true).is_err());
-    }
-
-    #[test]
-    fn test_cmd_gc_clean_store() {
-        let store_base = tempfile::tempdir().unwrap();
-        let objects = store_base.path().join("objects");
-        let graphs = store_base.path().join("graphs");
-        std::fs::create_dir_all(&objects).unwrap();
-        std::fs::create_dir_all(&graphs).unwrap();
-
-        let mut index = std::collections::HashMap::new();
-        index.insert("test-pkg@1.0.0".to_string(), "sha256-active".to_string());
-        std::fs::write(
-            store_base.path().join("index.json"),
-            serde_json::to_string(&index).unwrap(),
-        )
-        .unwrap();
-
-        std::fs::write(objects.join("sha256-active"), b"content").unwrap();
-        std::fs::write(objects.join("sha256-orphan"), b"orphan").unwrap();
-
-        cmd_gc_in(store_base.path()).unwrap();
-
-        assert!(objects.join("sha256-active").exists());
-        assert!(!objects.join("sha256-orphan").exists());
-    }
-
-    #[test]
-    fn test_cmd_gc_no_index() {
-        let store_base = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(store_base.path().join("objects")).unwrap();
-        std::fs::write(store_base.path().join("objects").join("some-hash"), b"data").unwrap();
-        cmd_gc_in(store_base.path()).unwrap();
     }
 }
