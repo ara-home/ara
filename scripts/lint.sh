@@ -5,9 +5,9 @@ cd "$(dirname "$0")/.."
 
 LINT_OPTS="-D clippy::all -D clippy::pedantic -W clippy::nursery -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic"
 
-echo "  LINT   ara (src-rs)"
-(cd src-rs && cargo clippy -- $LINT_OPTS 2>&1) || {
-    echo "  FAIL   ara (src-rs) clippy failed"
+echo "  LINT   ara"
+(cd src && cargo clippy -- $LINT_OPTS 2>&1) || {
+    echo "  FAIL   ara clippy failed"
     exit 1
 }
 

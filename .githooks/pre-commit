@@ -4,15 +4,15 @@ set -eu
 echo "  HOOK   pre-commit"
 cd "$(git rev-parse --show-toplevel)"
 
-echo "  TEST   ara (src-rs)"
-(cd src-rs && cargo test --quiet 2>/dev/null) || {
-    echo "  FAIL   ara (src-rs) tests failed, commit blocked"
+echo "  TEST   ara"
+(cd src && cargo test --quiet 2>/dev/null) || {
+    echo "  FAIL   ara tests failed, commit blocked"
     exit 1
 }
 
-echo "  LINT   ara (src-rs)"
-(cd src-rs && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null) || {
-    echo "  FAIL   ara (src-rs) clippy failed, commit blocked"
+echo "  LINT   ara"
+(cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null) || {
+    echo "  FAIL   ara clippy failed, commit blocked"
     exit 1
 }
 

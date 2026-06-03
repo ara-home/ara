@@ -97,19 +97,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ara-sec"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "walkdir",
-]
-
-[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
