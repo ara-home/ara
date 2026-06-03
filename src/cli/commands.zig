@@ -108,13 +108,24 @@ test "findDep returns null for missing" {
 
 // ── ara-sec IPC helpers ────────────────────────────────────────
 
-const ara_sec_paths = [_][]const u8{
+const ara_sec_dev_paths = [_][]const u8{
     "target/debug/ara-sec",
     "ara-sec/target/debug/ara-sec",
 };
 
 fn findAraSecBinary(allocator: std.mem.Allocator) ![]u8 {
-    for (ara_sec_paths) |rel| {
+    // 1. Same directory as the ara binary (release / .bin/)
+    if (std.fs.selfExeDirPathAlloc(allocator)) |dir| {
+        defer allocator.free(dir);
+        const path = try std.fs.path.join(allocator, &.{ dir, "ara-sec" });
+        if (std.fs.accessAbsolute(path, .{})) |_| {
+            return path;
+        } else |_| {
+            allocator.free(path);
+        }
+    } else |_| {}
+    // 2. Dev mode: workspace target, then local target
+    for (ara_sec_dev_paths) |rel| {
         const abs = std.fs.cwd().realpathAlloc(allocator, rel) catch continue;
         return abs;
     }

@@ -1,4 +1,4 @@
-.PHONY: all build build-sec test test-sec test-e2e clean install-hooks
+.PHONY: all build build-sec bundle test test-sec test-e2e clean install-hooks
 
 all: build build-sec
 
@@ -9,6 +9,9 @@ build:
 build-sec:
 	@echo "  BUILD  ara-sec"
 	@cd ara-sec && cargo build --quiet 2>&1
+
+bundle: build build-sec
+	@scripts/bundle.sh
 
 test:
 	@echo "  TEST   unit (ara)"
@@ -26,7 +29,7 @@ test-all: test test-sec test-e2e
 	@echo "  ALL    tests passed"
 
 clean:
-	@rm -rf zig-out .zig-cache
+	@rm -rf zig-out .zig-cache .bin
 	@cd ara-sec && cargo clean 2>/dev/null
 	@echo "  CLEAN"
 
