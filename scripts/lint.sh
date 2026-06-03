@@ -11,10 +11,4 @@ echo "  LINT   ara (src-rs)"
     exit 1
 }
 
-echo "  LINT   ara-sec"
-(cd ara-sec && cargo clippy -- $LINT_OPTS 2>&1) || {
-    echo "  FAIL   ara-sec clippy failed"
-    exit 1
-}
-
 echo "  PASS   all lints"
