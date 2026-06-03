@@ -18,6 +18,7 @@ tar = "0.4"
 flate2 = "1"
 tempfile = "3"
 libc = "0.2"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 

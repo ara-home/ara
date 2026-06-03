@@ -1,4 +1,5 @@
 mod analysis;
+mod cli;
 mod lockfile;
 mod manifest;
 mod resolver;
@@ -8,6 +9,12 @@ mod store;
 mod types;
 mod util;
 
+use clap::Parser;
+
 fn main() {
-    println!("ara package manager");
+    let cli = cli::Cli::parse();
+    if let Err(e) = cli.run() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
 }
