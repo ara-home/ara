@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -248,6 +248,89 @@ fn create_source(
     })
 }
 
+fn expand_workspace_members(
+    workspace: &crate::manifest::types::Workspace,
+    cwd: &Path,
+) -> Vec<crate::manifest::types::DependencyEntry> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for pattern in &workspace.members {
+        let full_pattern = cwd.join(pattern);
+        let full_str = full_pattern.to_string_lossy().to_string();
+
+        let matches = match glob::glob(&full_str) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("  warning: invalid workspace pattern \"{pattern}\": {e}");
+                continue;
+            }
+        };
+
+        for entry in matches {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("  warning: glob error for pattern \"{pattern}\": {e}");
+                    continue;
+                }
+            };
+
+            if !entry.is_dir() {
+                continue;
+            }
+
+            let member_toml = entry.join("ara.toml");
+            if !member_toml.exists() {
+                eprintln!(
+                    "  warning: workspace member {} has no ara.toml, skipping",
+                    entry.display()
+                );
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&member_toml) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  warning: cannot read {}: {e}", member_toml.display());
+                    continue;
+                }
+            };
+
+            let manifest = match parser::parse(&content) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  warning: failed to parse {}: {e}", member_toml.display());
+                    continue;
+                }
+            };
+
+            if !seen.insert(manifest.project.name.clone()) {
+                continue;
+            }
+
+            let rel_path = entry
+                .strip_prefix(cwd)
+                .unwrap_or(&entry)
+                .to_string_lossy()
+                .to_string();
+
+            entries.push(crate::manifest::types::DependencyEntry {
+                name: manifest.project.name,
+                source: "workspace".to_string(),
+                version: Some(manifest.project.version),
+                path: Some(rel_path),
+                repo: None,
+                url: None,
+                commit: None,
+                package: None,
+            });
+        }
+    }
+
+    entries
+}
+
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
@@ -341,12 +424,27 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
     let content = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("ara.toml not found at {}", manifest_path.display()))?;
 
-    let m = parser::parse(&content).context("failed to parse ara.toml")?;
+    let mut m = parser::parse(&content).context("failed to parse ara.toml")?;
 
     println!(
         "Installing dependencies for {} v{}",
         m.project.name, m.project.version
     );
+
+    // Expand workspace members into deps automatically
+    if let Some(ws) = &m.workspace {
+        let workspace_deps = expand_workspace_members(ws, cwd);
+        for dep in workspace_deps {
+            if !m.deps.iter().any(|d| d.name == dep.name) {
+                println!(
+                    "  workspace member: {} -> {}",
+                    dep.name,
+                    dep.path.as_deref().unwrap_or(".")
+                );
+                m.deps.push(dep);
+            }
+        }
+    }
 
     if m.deps.is_empty() {
         println!("No dependencies to install");
