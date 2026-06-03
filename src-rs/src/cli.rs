@@ -212,7 +212,24 @@ fn create_source(source_type: SourceType, dep: &crate::manifest::types::Dependen
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
-    archive.unpack(dest).context("failed to extract tarball")?;
+    for entry in archive.entries().context("failed to read tarball entries")? {
+        let mut entry = entry.context("failed to read tarball entry")?;
+        let path = entry.path().context("failed to read entry path")?;
+        let components: Vec<_> = path.components().collect();
+        let stripped = if components.first().map_or(false, |c| c.as_os_str() == "package") {
+            components.iter().skip(1).collect::<PathBuf>()
+        } else {
+            path.to_path_buf()
+        };
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dest.join(&stripped);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        entry.unpack(target)?;
+    }
     Ok(())
 }
 
