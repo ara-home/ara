@@ -22,6 +22,8 @@ pub const Command = enum {
     publish,
     gc,
     trust,
+    analyze,
+    audit,
     unknown,
 
     pub fn fromString(s: []const u8) Command {
@@ -104,6 +106,211 @@ test "findDep returns null for missing" {
     try std.testing.expect(findDep(&deps, "missing") == null);
 }
 
+// ── ara-sec IPC helpers ────────────────────────────────────────
+
+const ara_sec_paths = [_][]const u8{
+    "target/debug/ara-sec",
+    "ara-sec/target/debug/ara-sec",
+};
+
+fn findAraSecBinary(allocator: std.mem.Allocator) ![]u8 {
+    for (ara_sec_paths) |rel| {
+        const abs = std.fs.cwd().realpathAlloc(allocator, rel) catch continue;
+        return abs;
+    }
+    return error.AraSecNotFound;
+}
+
+fn callAraSec(allocator: std.mem.Allocator, binary: []const u8, method: []const u8, params: std.json.Value) !std.json.Parsed(std.json.Value) {
+    var child = std.process.Child.init(&.{ binary }, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    errdefer {
+        _ = child.wait() catch {};
+    }
+
+    const stdin = child.stdin.?.writer();
+    const stdout = child.stdout.?.reader();
+
+    // Build request
+    var req_obj = std.json.ObjectMap.init(allocator);
+    defer req_obj.deinit();
+    try req_obj.put("id", std.json.Value{ .integer = 1 });
+    try req_obj.put("method", std.json.Value{ .string = method });
+    try req_obj.put("params", params);
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    try std.json.stringify(std.json.Value{ .object = req_obj }, .{}, buf.writer());
+    try buf.append('\n');
+
+    stdin.writeAll(buf.items) catch {
+        _ = child.wait() catch {};
+        return error.ConnectionClosed;
+    };
+
+    // Read response
+    var line_buf: [65536]u8 = undefined;
+    const line = stdout.readUntilDelimiterOrEof(&line_buf, '\n') catch {
+        _ = child.wait() catch {};
+        return error.ConnectionClosed;
+    } orelse {
+        _ = child.wait() catch {};
+        return error.ConnectionClosed;
+    };
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    errdefer parsed.deinit();
+
+    // Send shutdown
+    var shutdown_obj = std.json.ObjectMap.init(allocator);
+    defer shutdown_obj.deinit();
+    try shutdown_obj.put("id", std.json.Value{ .integer = 2 });
+    try shutdown_obj.put("method", std.json.Value{ .string = "shutdown" });
+    try shutdown_obj.put("params", std.json.Value{ .null = {} });
+
+    var shutdown_buf = std.ArrayList(u8).init(allocator);
+    defer shutdown_buf.deinit();
+    try std.json.stringify(std.json.Value{ .object = shutdown_obj }, .{}, shutdown_buf.writer());
+    try shutdown_buf.append('\n');
+    stdin.writeAll(shutdown_buf.items) catch {};
+    _ = child.wait() catch {};
+
+    return parsed;
+}
+
+fn severityColor(severity: []const u8) []const u8 {
+    if (std.mem.eql(u8, severity, "critical")) return "\x1b[31;1m"; // red bold
+    if (std.mem.eql(u8, severity, "high")) return "\x1b[31m"; // red
+    if (std.mem.eql(u8, severity, "medium")) return "\x1b[33m"; // yellow
+    if (std.mem.eql(u8, severity, "low")) return "\x1b[36m"; // cyan
+    return "\x1b[0m";
+}
+
+fn severityLabel(severity: []const u8) []const u8 {
+    if (std.mem.eql(u8, severity, "critical")) return "CRITICAL";
+    if (std.mem.eql(u8, severity, "high")) return "HIGH";
+    if (std.mem.eql(u8, severity, "medium")) return "MEDIUM";
+    if (std.mem.eql(u8, severity, "low")) return "LOW";
+    return "UNKNOWN";
+}
+
+fn printFindings(findings: std.json.Array, risk_level: std.json.Value) void {
+    const reset = "\x1b[0m";
+
+    for (findings.items) |item| {
+        const obj = item.object;
+        const severity = obj.get("severity").?.string;
+        const pattern = obj.get("pattern").?.string;
+        const location = if (obj.get("location")) |loc| loc.string else "-";
+        const description = obj.get("description").?.string;
+
+        const color = severityColor(severity);
+        const label = severityLabel(severity);
+        std.debug.print("  {s}{s:>8}{s}  {s:<20}  {s:<25}  {s}\n", .{ color, label, reset, pattern, location, description });
+    }
+
+    const rl = if (risk_level == .string) risk_level.string else "unknown";
+    const rl_label = severityLabel(rl);
+    const rl_color = severityColor(rl);
+    std.debug.print("\n  Risk level: {s}{s}{s}\n", .{ rl_color, rl_label, reset });
+}
+
+// ── analyze command ────────────────────────────────────────────
+
+pub fn analyzeCommand(allocator: std.mem.Allocator, _: []const u8, path_arg: ?[]const u8) !void {
+    const binary = findAraSecBinary(allocator) catch {
+        std.debug.print("error: ara-sec binary not found. Run `make build-sec` first.\n", .{});
+        return;
+    };
+    defer allocator.free(binary);
+
+    const pkg_path = path_arg orelse ".";
+    const abs_path = try std.fs.cwd().realpathAlloc(allocator, pkg_path);
+    defer allocator.free(abs_path);
+
+    std.debug.print("Analyzing {s}...\n\n", .{abs_path});
+
+    var params_obj = std.json.ObjectMap.init(allocator);
+    defer params_obj.deinit();
+    try params_obj.put("package_path", std.json.Value{ .string = abs_path });
+
+    const parsed = callAraSec(allocator, binary, "analyze", std.json.Value{ .object = params_obj }) catch |err| {
+        std.debug.print("error: analysis failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const result = root.object.get("result") orelse {
+        std.debug.print("error: unexpected response format\n", .{});
+        return;
+    };
+
+    const risk_level = result.object.get("risk_level") orelse std.json.Value{ .string = "unknown" };
+    const findings = result.object.get("findings") orelse std.json.Value{ .array = std.json.Array.init(allocator) };
+
+    const arr = findings.array;
+    if (arr.items.len == 0) {
+        std.debug.print("  No suspicious patterns detected.\n", .{});
+    } else {
+        printFindings(arr, risk_level);
+    }
+}
+
+// ── audit command ──────────────────────────────────────────────
+
+pub fn auditCommand(allocator: std.mem.Allocator, _: []const u8, path_arg: ?[]const u8) !void {
+    const binary = findAraSecBinary(allocator) catch {
+        std.debug.print("error: ara-sec binary not found. Run `make build-sec` first.\n", .{});
+        return;
+    };
+    defer allocator.free(binary);
+
+    const pkg_path = path_arg orelse ".";
+    const abs_path = try std.fs.cwd().realpathAlloc(allocator, pkg_path);
+    defer allocator.free(abs_path);
+
+    std.debug.print("Auditing {s}...\n\n", .{abs_path});
+
+    var params_obj = std.json.ObjectMap.init(allocator);
+    defer params_obj.deinit();
+    try params_obj.put("package_path", std.json.Value{ .string = abs_path });
+
+    const parsed = callAraSec(allocator, binary, "audit", std.json.Value{ .object = params_obj }) catch |err| {
+        std.debug.print("error: audit failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    const result = root.object.get("result") orelse {
+        std.debug.print("error: unexpected response format\n", .{});
+        return;
+    };
+    const report = result.object.get("report") orelse {
+        std.debug.print("error: unexpected response format\n", .{});
+        return;
+    };
+
+    const risk_level = report.object.get("risk_level") orelse std.json.Value{ .string = "unknown" };
+    const findings = report.object.get("findings") orelse std.json.Value{ .array = std.json.Array.init(allocator) };
+    const summary = if (report.object.get("summary")) |s| s.string else "No summary.";
+
+    const arr = findings.array;
+    if (arr.items.len == 0) {
+        std.debug.print("  No suspicious patterns detected.\n", .{});
+    } else {
+        printFindings(arr, risk_level);
+    }
+
+    std.debug.print("\n  Summary: {s}\n", .{summary});
+}
+
+// ── install command ────────────────────────────────────────────
+
 pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     const manifest_path = try std.fs.path.join(allocator, &.{ cwd, "ara.toml" });
     defer allocator.free(manifest_path);
@@ -170,6 +377,12 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
     var pkg_entries = std.ArrayList(lockfile_types.PackageEntry).init(allocator);
     defer pkg_entries.deinit();
 
+    // Try to find ara-sec binary for install-time analysis (non-fatal if not found)
+    const sec_binary = findAraSecBinary(allocator) catch null;
+    defer if (sec_binary) |s| allocator.free(s);
+
+    const sec_binary_path = sec_binary orelse "";
+
     for (graph.nodes.items) |*node| {
         var ver_buf: [64]u8 = undefined;
         const ver_str = std.fmt.bufPrint(&ver_buf, "{}.{}.{}", .{ node.version.major, node.version.minor, node.version.patch }) catch "0.0.0";
@@ -216,7 +429,41 @@ pub fn install(allocator: std.mem.Allocator, cwd: []const u8) !void {
             .package_hash = hash_str,
         });
 
-        std.debug.print("  ✓ {s}@{s} ({s})\n", .{ node.name, ver_str, hash_str });
+        std.debug.print("  ✓ {s}@{s} ({s})", .{ node.name, ver_str, hash_str });
+
+        // Analyze package after extraction
+        if (sec_binary_path.len > 0) {
+            var sec_params = std.json.ObjectMap.init(allocator);
+            defer sec_params.deinit();
+            try sec_params.put("package_path", std.json.Value{ .string = pkg_dir });
+
+            const parsed = callAraSec(allocator, sec_binary_path, "analyze", std.json.Value{ .object = sec_params }) catch {
+                std.debug.print("\n", .{});
+                continue;
+            };
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                const findings = if (result.object.get("findings")) |f| f.array else std.json.Array.init(allocator);
+                if (findings.items.len > 0) {
+                    const rl = if (result.object.get("risk_level")) |rl| rl.string else "unknown";
+                    const by_severity = counts: {
+                        var ct: u32 = 0;
+                        for (findings.items) |fi| {
+                            _ = fi;
+                            ct += 1;
+                        }
+                        break :counts ct;
+                    };
+                    _ = by_severity;
+                    const first_desc = findings.items[0].object.get("description").?.string;
+                    const first_loc = if (findings.items[0].object.get("location")) |loc| loc.string else "";
+                    std.debug.print(" ⚠  {d} finding(s) ({s}) — {s} in {s}", .{ findings.items.len, rl, first_desc, first_loc });
+                }
+            }
+        }
+
+        std.debug.print("\n", .{});
     }
 
     const ts = try currentTimestamp(allocator);

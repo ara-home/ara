@@ -27,6 +27,14 @@ pub fn main() !void {
             }
             try commands.run(allocator, cwd, args[2]);
         },
+        .analyze => {
+            const path_arg: ?[]const u8 = if (args.len >= 3) args[2] else null;
+            try commands.analyzeCommand(allocator, cwd, path_arg);
+        },
+        .audit => {
+            const path_arg: ?[]const u8 = if (args.len >= 3) args[2] else null;
+            try commands.auditCommand(allocator, cwd, path_arg);
+        },
         .build => {
             std.debug.print("build: not yet implemented\n", .{});
         },
@@ -55,12 +63,14 @@ fn printUsage() !void {
         \\ara — deterministic package manager
         \\
         \\Usage:
-        \\  ara install         Install dependencies
-        \\  ara run <script>    Run a script
-        \\  ara build           Build the project
-        \\  ara publish         Publish a package
-        \\  ara gc              Garbage collect store
-        \\  ara trust <pkg>     Trust a package
+        \\  ara install            Install dependencies
+        \\  ara run <script>       Run a script
+        \\  ara analyze [<path>]   Analyze a package for security issues
+        \\  ara audit [<path>]     Run a full security audit
+        \\  ara build              Build the project
+        \\  ara publish            Publish a package
+        \\  ara gc                 Garbage collect store
+        \\  ara trust <pkg>        Trust a package
         \\
     , .{});
 }
