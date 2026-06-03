@@ -2,8 +2,6 @@
 //! Supports three profiles: Hermetic (minimal syscalls), Restricted (safe syscalls),
 //! and Open (no restrictions).
 
-#![allow(dead_code)]
-
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 

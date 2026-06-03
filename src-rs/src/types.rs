@@ -402,13 +402,6 @@ pub struct AnalysisResult {
     pub findings: Vec<Finding>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct VerifyResult {
-    pub valid: bool,
-    pub message: String,
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
