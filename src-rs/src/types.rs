@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
 
@@ -5,7 +6,7 @@ use std::str::FromStr;
 // SourceType
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceType {
     Workspace,
     Local,
@@ -52,7 +53,7 @@ impl FromStr for SourceType {
 // Version
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,

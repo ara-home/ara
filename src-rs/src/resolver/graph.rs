@@ -1,6 +1,9 @@
-use crate::types::{SourceType, Version};
+#![allow(dead_code)]
 
-#[derive(Debug, Clone)]
+use crate::types::{SourceType, Version};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Node {
     pub name: String,
     pub source: SourceType,

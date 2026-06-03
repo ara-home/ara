@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -5,9 +6,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::analysis::analyzer;
-use crate::lockfile::types::{GraphMeta, Lockfile, PackageEntry};
+use crate::lockfile::types::{GraphMeta, Lockfile, PackageEntry, SecurityMeta};
 use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
+use crate::sandbox::executor::Executor;
+use crate::sandbox::profiles::{Profile, SandboxConfig};
 use crate::source::Source;
 use crate::store::cas::Store;
 use crate::types::{Constraint, RiskLevel, SourceType};
@@ -167,7 +170,8 @@ fn find_dep<'a>(deps: &'a [crate::manifest::types::DependencyEntry], name: &str)
 
 fn source_type_from_str(s: &str) -> SourceType {
     match s {
-        "npm" | "registry" => SourceType::Npm,
+        "npm" => SourceType::Npm,
+        "registry" => SourceType::Registry,
         "github" => SourceType::Github,
         "git" => SourceType::Git,
         "local" => SourceType::Local,
@@ -178,9 +182,13 @@ fn source_type_from_str(s: &str) -> SourceType {
 
 fn create_source(source_type: SourceType, dep: &crate::manifest::types::DependencyEntry) -> Result<Source> {
     Ok(match source_type {
-        SourceType::Npm | SourceType::Registry => {
+        SourceType::Npm => {
             let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
             Source::Npm(crate::source::registry::RegistrySource::new(url.to_string()))
+        }
+        SourceType::Registry => {
+            let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
+            Source::Registry(crate::source::registry::RegistrySource::new(url.to_string()))
         }
         SourceType::Github => {
             let repo = dep.repo.as_deref().context("missing repo for github source")?;
@@ -292,12 +300,42 @@ fn cmd_install() -> Result<()> {
     let graph = r.resolve();
     println!("Resolved {} packages", graph.nodes.len());
 
+    let node_modules = cwd.join("node_modules");
+
+    // Step 5: Check lockfile for fast-path (skip if already up-to-date)
+    let lock_path = cwd.join("ara.lock");
+    if lock_path.exists() && node_modules.exists() {
+        let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
+            let match_count = graph.nodes.iter().filter(|n| {
+                let v = format!("{}.{}.{}", n.version.major, n.version.minor, n.version.patch);
+                let src = n.source.to_string();
+                existing.packages.iter().any(|p| p.name == n.name && p.version == v && p.source == src)
+            }).count();
+            if match_count == graph.nodes.len() && !graph.nodes.is_empty() {
+                let all_exist = graph.nodes.iter().all(|n| node_modules.join(&n.name).exists());
+                if all_exist {
+                    println!("Lockfile is up to date. Nothing to install.");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let store_base = PathBuf::from(&home).join(".ara").join("store");
     let store = Store::new(store_base.clone());
     store.ensure_dirs()?;
 
-    let node_modules = cwd.join("node_modules");
+    // Step 2: Load store index for cache lookups
+    let index_path = store_base.join("index.json");
+    let mut store_index: HashMap<String, String> = if index_path.exists() {
+        let idx_content = std::fs::read_to_string(&index_path)?;
+        serde_json::from_str(&idx_content).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
     if let Err(e) = std::fs::create_dir_all(&node_modules) {
         if e.kind() != std::io::ErrorKind::AlreadyExists {
             return Err(e).context("failed to create node_modules directory");
@@ -325,24 +363,28 @@ fn cmd_install() -> Result<()> {
             }
         };
 
-        println!("  fetching {}@{}...", node.name, ver_str);
+        let cache_key = format!("{}@{}", node.name, ver_str);
 
-        let identity = crate::types::PackageIdentity {
-            source: node.source,
-            name: node.name.clone(),
-            version: node.version.clone(),
-            content_hash: None,
-        };
-
-        let pkg_content = match src.fetch(&identity) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("  failed to fetch {}: {}", node.name, e);
-                continue;
+        // Step 2: Check store cache before fetching
+        let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
+            if store.contains(cached_hash) {
+                match store.get(cached_hash)? {
+                    Some(content) => {
+                        println!("  using cached {}@{}", node.name, ver_str);
+                        (content, cached_hash.clone())
+                    }
+                    None => {
+                        store_index.remove(&cache_key);
+                        fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
+                    }
+                }
+            } else {
+                store_index.remove(&cache_key);
+                fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
             }
+        } else {
+            fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
         };
-
-        let hash_str = store.put(&pkg_content)?;
 
         let pkg_dir = node_modules.join(&node.name);
 
@@ -355,6 +397,33 @@ fn cmd_install() -> Result<()> {
             continue;
         }
 
+        // Step 4: Analyze package and capture security info
+        let security = match analyzer::analyze_package(&pkg_dir) {
+            Ok(result) => {
+                if !result.findings.is_empty() {
+                    let rl = result.risk_level;
+                    let first = &result.findings[0];
+                    let loc = first.location.as_deref().unwrap_or("");
+                    print!("  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
+                        node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc);
+                    Some(SecurityMeta {
+                        risk_level: Some(rl.to_string()),
+                        analysis_version: Some("1.0.0".to_string()),
+                    })
+                } else {
+                    print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                    Some(SecurityMeta {
+                        risk_level: Some(result.risk_level.to_string()),
+                        analysis_version: Some("1.0.0".to_string()),
+                    })
+                }
+            }
+            Err(_) => {
+                print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                None
+            }
+        };
+
         pkg_entries.push(PackageEntry {
             name: node.name.clone(),
             version: ver_str.clone(),
@@ -365,28 +434,19 @@ fn cmd_install() -> Result<()> {
             repository: None,
             commit: None,
             dependencies: None,
-            security: None,
+            security,
             sbom: None,
         });
 
-        print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-
-        // Analyze package after extraction (non-fatal)
-        match analyzer::analyze_package(&pkg_dir) {
-            Ok(result) => {
-                if !result.findings.is_empty() {
-                    let rl = result.risk_level;
-                    let first = &result.findings[0];
-                    let loc = first.location.as_deref().unwrap_or("");
-                    let extra = format!(" ⚠  {} finding(s) ({}) — {} in {}", result.findings.len(), rl, first.description, loc);
-                    print!("{}", extra);
-                }
-            }
-            Err(_) => {}
-        }
-
         println!();
     }
+
+    // Save store index for future cache lookups
+    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+
+    // Step 3: Store graph and compute graph_hash
+    let graph_bytes = serde_json::to_vec(&graph.nodes)?;
+    let graph_hash = store.put_graph(&graph_bytes)?;
 
     let ts = current_timestamp();
 
@@ -395,7 +455,7 @@ fn cmd_install() -> Result<()> {
         graph: GraphMeta {
             resolver: "mvs".to_string(),
             generated_at: Some(ts),
-            graph_hash: None,
+            graph_hash: Some(graph_hash),
         },
         packages: pkg_entries,
     };
@@ -409,17 +469,42 @@ fn cmd_install() -> Result<()> {
     Ok(())
 }
 
+fn fetch_and_store(
+    store: &Store,
+    store_index: &mut HashMap<String, String>,
+    src: &Source,
+    cache_key: &str,
+    node: &crate::resolver::graph::Node,
+    ver_str: &str,
+) -> Result<(Vec<u8>, String)> {
+    println!("  fetching {}@{}...", node.name, ver_str);
+
+    let identity = crate::types::PackageIdentity {
+        source: node.source,
+        name: node.name.clone(),
+        version: node.version.clone(),
+        content_hash: None,
+    };
+
+    let pkg_content = match src.fetch(&identity) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(anyhow::anyhow!("failed to fetch {}: {}", node.name, e));
+        }
+    };
+
+    let hash_str = store.put(&pkg_content)?;
+    store_index.insert(cache_key.to_string(), hash_str.clone());
+
+    Ok((pkg_content, hash_str))
+}
+
 // ── run command ────────────────────────────────────────────────────────────
 
 fn cmd_run(script: &str) -> Result<()> {
     println!("running: {script}");
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(script)
-        .status()
-        .context("failed to execute script")?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    let config = SandboxConfig::for_profile(Profile::Restricted);
+    let executor = Executor::new(config);
+    executor.execute(script)?;
     Ok(())
 }

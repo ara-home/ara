@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -7,8 +9,6 @@ use crate::sandbox::profiles::{Profile, SandboxConfig};
 pub enum ExecutorError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("seccomp error: {0}")]
-    Seccomp(String),
 }
 
 pub struct Executor {
@@ -45,10 +45,6 @@ impl Executor {
         Ok(())
     }
 
-    pub fn dry_run(&self, command: &str) {
-        eprintln!("[sandbox] would execute: {command}");
-        eprintln!("[sandbox] profile: {:?}", self.config.profile);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,14 +454,6 @@ fn apply_seccomp(_profile: Profile) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_dry_run() {
-        let config = SandboxConfig::for_profile(Profile::Restricted);
-        let ex = Executor::new(config);
-        // just ensure it doesn't crash
-        ex.dry_run("echo hello");
-    }
 
     #[test]
     fn test_build_filter_hermetic() {

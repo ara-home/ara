@@ -61,30 +61,38 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
     let raw: ManifestRaw = toml::from_str(content)?;
 
     let project = match raw.project {
-        Some(p) => Project {
-            name: p.name.unwrap_or_default(),
-            version: p.version.unwrap_or_default(),
-            description: p.description,
-            license: p.license,
-            repository: p.repository,
-            homepage: p.homepage,
-        },
-        None => Project {
-            name: String::new(),
-            version: String::new(),
-            description: None,
-            license: None,
-            repository: None,
-            homepage: None,
-        },
+        Some(p) => {
+            let name = p.name.unwrap_or_default();
+            let version = p.version.unwrap_or_default();
+            if name.is_empty() {
+                return Err(ManifestParseError::MissingProjectName);
+            }
+            if version.is_empty() {
+                return Err(ManifestParseError::MissingProjectVersion);
+            }
+            Project {
+                name,
+                version,
+                description: p.description,
+                license: p.license,
+                repository: p.repository,
+                homepage: p.homepage,
+            }
+        }
+        None => return Err(ManifestParseError::MissingProjectName),
     };
+
+    let valid_sources = ["npm", "registry", "github", "git", "local", "workspace"];
 
     let deps = match raw.deps {
         Some(map) => map
             .into_iter()
             .map(|(name, raw)| {
                 let source = raw.source.unwrap_or_else(|| "npm".to_string());
-                DependencyEntry {
+                if !valid_sources.contains(&source.as_str()) {
+                    return Err(ManifestParseError::UnknownSourceType);
+                }
+                Ok(DependencyEntry {
                     name,
                     source,
                     version: raw.version,
@@ -93,11 +101,27 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                     commit: raw.commit,
                     path: raw.path,
                     package: raw.package,
-                }
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
     };
+
+    let valid_risk_levels = ["low", "medium", "high", "critical"];
+
+    let security = raw.security.map(|s| {
+        if let Some(ref threshold) = s.risk_threshold {
+            if !valid_risk_levels.contains(&threshold.as_str()) {
+                return Err(ManifestParseError::InvalidRiskLevel);
+            }
+        }
+        Ok(Security {
+            risk_threshold: s.risk_threshold,
+            require_review: s.require_review,
+            allow_lifecycle_scripts: s.allow_lifecycle_scripts,
+            block_critical: s.block_critical,
+        })
+    }).transpose()?;
 
     let workspace = raw.workspace.and_then(|w| {
         w.members.map(|members| Workspace { members })
@@ -110,13 +134,6 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
             .collect(),
         None => Vec::new(),
     };
-
-    let security = raw.security.map(|s| Security {
-        risk_threshold: s.risk_threshold,
-        require_review: s.require_review,
-        allow_lifecycle_scripts: s.allow_lifecycle_scripts,
-        block_critical: s.block_critical,
-    });
 
     let build = raw.build.map(|b| Build {
         hermetic: b.hermetic,
@@ -191,8 +208,54 @@ mod tests {
             name = "no-project"
             version = "0.1.0"
         "#;
-        let m = parse(src).unwrap();
-        assert!(m.project.name.is_empty());
+        match parse(src) {
+            Err(ManifestParseError::MissingProjectName) => {}
+            other => panic!("expected MissingProjectName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_missing_project_version() {
+        let src = r#"
+            [project]
+            name = "app"
+        "#;
+        match parse(src) {
+            Err(ManifestParseError::MissingProjectVersion) => {}
+            other => panic!("expected MissingProjectVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_source_type() {
+        let src = r#"
+            [project]
+            name = "app"
+            version = "0.1.0"
+
+            [deps]
+            foo = { source = "nonexistent", version = "1.0.0" }
+        "#;
+        match parse(src) {
+            Err(ManifestParseError::UnknownSourceType) => {}
+            other => panic!("expected UnknownSourceType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_risk_level() {
+        let src = r#"
+            [project]
+            name = "app"
+            version = "0.1.0"
+
+            [security]
+            risk_threshold = "bogus"
+        "#;
+        match parse(src) {
+            Err(ManifestParseError::InvalidRiskLevel) => {}
+            other => panic!("expected InvalidRiskLevel, got {other:?}"),
+        }
     }
 
     #[test]

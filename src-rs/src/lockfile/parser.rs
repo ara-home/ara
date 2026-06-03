@@ -2,8 +2,6 @@ use crate::lockfile::types::Lockfile;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockfileParseError {
-    #[error("invalid lockfile version")]
-    InvalidVersion,
     #[error("toml parse error: {0}")]
     Toml(#[from] toml::de::Error),
 }

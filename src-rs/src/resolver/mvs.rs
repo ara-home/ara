@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use crate::resolver::graph::{Graph, Node};
@@ -67,12 +69,19 @@ impl Default for Resolver {
 fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Version> {
     let mut best: Option<Version> = None;
 
-    for c in constraints {
-        if c.package != package {
-            continue;
-        }
+    // Collect all constraints for this package
+    let pkg_constraints: Vec<&Constraint> = constraints
+        .iter()
+        .filter(|c| c.package == package)
+        .map(|c| &c.constraint)
+        .collect();
 
-        let candidate = match &c.constraint {
+    if pkg_constraints.is_empty() {
+        return None;
+    }
+
+    for c in &pkg_constraints {
+        let candidate = match c {
             Constraint::Exact(v) => v.clone(),
             Constraint::GreaterOrEqual(v) => v.clone(),
             Constraint::GreaterThan(v) => v.clone(),
@@ -82,8 +91,11 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
             Constraint::Wildcard(_) => Version::parse("0.0.0").ok()?,
         };
 
-        if best.as_ref().map_or(true, |b| candidate > *b) {
-            best = Some(candidate);
+        // Verify candidate satisfies ALL constraints for this package
+        if pkg_constraints.iter().all(|con| con.satisfied_by(&candidate)) {
+            if best.as_ref().map_or(true, |b| candidate > *b) {
+                best = Some(candidate);
+            }
         }
     }
 
