@@ -1,4 +1,6 @@
 mod analysis;
+mod lockfile;
+mod manifest;
 mod types;
 mod util;
 
