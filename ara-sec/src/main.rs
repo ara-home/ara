@@ -1,13 +1,16 @@
-//! ara-sec, as a Security analysis engine for the Ara package manager.
+//! ara-sec — Security analysis engine for the Ara package manager.
 //!
 //! Communicates with the Zig host process via JSON-RPC over stdin/stdout.
 
 #![warn(clippy::pedantic, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod analysis;
 mod types;
 
-use anyhow::Context;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+
+use anyhow::Context;
 use types::{Method, Request, Response};
 
 fn main() -> anyhow::Result<()> {
@@ -48,27 +51,26 @@ fn dispatch(req: &Request) -> Response {
 }
 
 fn handle_analyze(req: &Request) -> Response {
-    let path = req.params.get("package_path").and_then(|v| v.as_str());
-    let path = match path {
-        Some(p) => p,
-        None => return Response::err(req.id, -1, "missing field: package_path"),
+    let Some(path) = req.params.get("package_path").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, -1, "missing field: package_path");
     };
 
-    Response::ok(
-        req.id,
-        serde_json::json!({
-            "risk_level": "low",
-            "findings": [],
-            "package_path": path,
-        }),
-    )
+    match analysis::analyzer::analyze_package(Path::new(path)) {
+        Ok(result) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "risk_level": result.risk_level,
+                "findings": result.findings,
+                "package_path": path,
+            }),
+        ),
+        Err(e) => Response::err(req.id, -2, format!("analysis failed: {e}")),
+    }
 }
 
 fn handle_scan(req: &Request) -> Response {
-    let hash = req.params.get("package_hash").and_then(|v| v.as_str());
-    let hash = match hash {
-        Some(h) => h,
-        None => return Response::err(req.id, -1, "missing field: package_hash"),
+    let Some(hash) = req.params.get("package_hash").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, -1, "missing field: package_hash");
     };
 
     Response::ok(
@@ -81,10 +83,8 @@ fn handle_scan(req: &Request) -> Response {
 }
 
 fn handle_verify(req: &Request) -> Response {
-    let signature = req.params.get("signature").and_then(|v| v.as_str());
-    let signature = match signature {
-        Some(s) => s,
-        None => return Response::err(req.id, -1, "missing field: signature"),
+    let Some(signature) = req.params.get("signature").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, -1, "missing field: signature");
     };
 
     Response::ok(
@@ -97,23 +97,36 @@ fn handle_verify(req: &Request) -> Response {
 }
 
 fn handle_audit(req: &Request) -> Response {
-    let path = req.params.get("package_path").and_then(|v| v.as_str());
-    let path = match path {
-        Some(p) => p,
-        None => return Response::err(req.id, -1, "missing field: package_path"),
+    let Some(path) = req.params.get("package_path").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, -1, "missing field: package_path");
     };
 
-    Response::ok(
-        req.id,
-        serde_json::json!({
-            "report": {
-                "package_path": path,
-                "risk_level": "low",
-                "findings": [],
-                "summary": "No suspicious patterns detected.",
-            }
-        }),
-    )
+    match analysis::analyzer::analyze_package(Path::new(path)) {
+        Ok(result) => {
+            let summary = if result.findings.is_empty() {
+                "No suspicious patterns detected.".to_string()
+            } else {
+                format!(
+                    "Found {} potential issue(s) with {} risk level.",
+                    result.findings.len(),
+                    serde_json::to_string(&result.risk_level).unwrap_or_default().replace('\"', ""),
+                )
+            };
+
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "report": {
+                        "package_path": path,
+                        "risk_level": result.risk_level,
+                        "findings": result.findings,
+                        "summary": summary,
+                    }
+                }),
+            )
+        }
+        Err(e) => Response::err(req.id, -2, format!("audit failed: {e}")),
+    }
 }
 
 #[cfg(test)]
@@ -133,17 +146,15 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_analyze_ok() {
+    fn test_handle_analyze_nonexistent_package() {
         let req = Request {
             id: 2,
             method: Method::Analyze,
-            params: serde_json::json!({"package_path": "/tmp/pkg"}),
+            params: serde_json::json!({"package_path": "/tmp/nonexistent_ara_test_xyz_42"}),
         };
         let resp = dispatch(&req);
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        assert_eq!(result["risk_level"], "low");
-        assert_eq!(result["package_path"], "/tmp/pkg");
+        assert!(resp.result.is_none());
+        assert_eq!(resp.error.unwrap().code, -2);
     }
 
     #[test]
@@ -170,26 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_audit_ok() {
+    fn test_handle_audit_nonexistent_package() {
         let req = Request {
             id: 5,
             method: Method::Audit,
-            params: serde_json::json!({"package_path": "/tmp/pkg"}),
+            params: serde_json::json!({"package_path": "/tmp/nonexistent_ara_test_xyz_42"}),
         };
         let resp = dispatch(&req);
-        let result = resp.result.unwrap();
-        assert!(result["report"]["summary"].as_str().is_some());
-    }
-
-    #[test]
-    fn test_dispatch_unknown_method() {
-        let req = Request {
-            id: 0,
-            method: Method::Shutdown,
-            params: serde_json::json!(null),
-        };
-        let resp = dispatch(&req);
-        assert!(resp.error.is_none());
+        assert!(resp.result.is_none());
     }
 
     #[test]

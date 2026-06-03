@@ -60,7 +60,6 @@ pub struct RpcError {
 }
 
 /// Risk classification for a package or finding.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
@@ -71,7 +70,6 @@ pub enum RiskLevel {
 }
 
 /// A single security finding discovered during analysis.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     pub pattern: String,
@@ -82,7 +80,6 @@ pub struct Finding {
 }
 
 /// Complete result returned by the `analyze` method.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalysisResult {
     pub risk_level: RiskLevel,
