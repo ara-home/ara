@@ -76,7 +76,11 @@ pub fn scan_package(package_path: &Path) -> Result<Vec<ScannedFile>> {
             continue;
         }
 
-        if entry.metadata().ok().is_some_and(|m| m.len() > MAX_FILE_SIZE) {
+        if entry
+            .metadata()
+            .ok()
+            .is_some_and(|m| m.len() > MAX_FILE_SIZE)
+        {
             continue;
         }
 
@@ -126,7 +130,10 @@ mod tests {
         write_file(dir.path(), "main.py", "print('hello')");
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
 
         assert!(paths.contains(&"index.js"));
         assert!(paths.contains(&"lib.ts"));
@@ -143,7 +150,10 @@ mod tests {
         write_file(dir.path(), "index.js", "console.log('x')");
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(paths.contains(&"package.json"));
     }
 
@@ -155,7 +165,10 @@ mod tests {
         write_file(dir.path(), "node_modules/package.json", "{}");
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(paths.contains(&"index.js"));
         assert_eq!(paths.len(), 1);
     }
@@ -170,7 +183,10 @@ mod tests {
         write_file(dir.path(), "build/out.js", "build");
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert_eq!(paths, vec!["index.js"]);
     }
 
@@ -183,7 +199,10 @@ mod tests {
         fs::write(&binary_path, b"ok\x00binary").unwrap();
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(paths.contains(&"normal.js"));
         assert!(!paths.contains(&"binary.js"));
     }
@@ -197,7 +216,10 @@ mod tests {
         fs::write(&large_path, large_content).unwrap();
 
         let files = scan_package(dir.path()).unwrap();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(paths.contains(&"small.js"));
         assert!(!paths.contains(&"large.js"));
     }

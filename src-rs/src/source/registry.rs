@@ -15,7 +15,9 @@ impl RegistrySource {
     pub fn resolve(&self, name: &str) -> Result<String, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let url = format!("{}/{name}", self.registry_url);
-        let body = client.get(&url).map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let body = client
+            .get(&url)
+            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
 
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
@@ -49,13 +51,18 @@ impl RegistrySource {
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
-        let ver_str = format!("{}.{}.{}", identity.version.major, identity.version.minor, identity.version.patch);
+        let ver_str = format!(
+            "{}.{}.{}",
+            identity.version.major, identity.version.minor, identity.version.patch
+        );
         let tarball_url = format!(
             "{}/{name}/-/{name}-{ver_str}.tgz",
             self.registry_url,
             name = identity.name
         );
-        let body = client.get(&tarball_url).map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let body = client
+            .get(&tarball_url)
+            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
     }
 }
@@ -77,7 +84,8 @@ mod tests {
             }
         });
 
-        let mock = server.mock("GET", "/zod")
+        let mock = server
+            .mock("GET", "/zod")
             .with_status(200)
             .with_body(body.to_string())
             .create();
@@ -92,9 +100,7 @@ mod tests {
     fn test_resolve_package_not_found_404() {
         let mut server = mockito::Server::new();
         let url = server.url();
-        let mock = server.mock("GET", "/missing")
-            .with_status(404)
-            .create();
+        let mock = server.mock("GET", "/missing").with_status(404).create();
 
         let src = RegistrySource::new(format!("{url}"));
         let err = src.resolve("missing").unwrap_err();
@@ -106,7 +112,8 @@ mod tests {
     fn test_resolve_invalid_json() {
         let mut server = mockito::Server::new();
         let url = server.url();
-        let _mock = server.mock("GET", "/bad")
+        let _mock = server
+            .mock("GET", "/bad")
             .with_status(200)
             .with_body("this is not json")
             .create();
@@ -122,7 +129,8 @@ mod tests {
         let url = server.url();
         let body = serde_json::json!({ "versions": {} });
 
-        let _mock = server.mock("GET", "/empty")
+        let _mock = server
+            .mock("GET", "/empty")
             .with_status(200)
             .with_body(body.to_string())
             .create();
@@ -138,7 +146,11 @@ mod tests {
         let url = server.url();
         let tarball = b"fake-tarball-content";
 
-        let mock = server.mock("GET", mockito::Matcher::Regex(r"^/zod/-/zod-.*$".to_string()))
+        let mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/zod/-/zod-.*$".to_string()),
+            )
             .with_status(200)
             .with_body(tarball)
             .create();

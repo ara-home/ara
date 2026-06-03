@@ -99,7 +99,10 @@ mod tests {
         assert_eq!(lf.packages.len(), 1);
         assert_eq!(lf.packages[0].name, "zod");
         assert_eq!(lf.packages[0].version, "3.23.8");
-        assert_eq!(lf.graph.generated_at.as_deref(), Some("2025-01-01T00:00:00Z"));
+        assert_eq!(
+            lf.graph.generated_at.as_deref(),
+            Some("2025-01-01T00:00:00Z")
+        );
     }
 
     #[test]
@@ -144,7 +147,10 @@ mod tests {
         assert_eq!(pkg.name, "lib");
         assert_eq!(pkg.integrity.as_deref(), Some("sha256-yyy"));
         assert_eq!(pkg.dependencies.as_ref().unwrap().len(), 2);
-        assert_eq!(pkg.security.as_ref().unwrap().risk_level.as_deref(), Some("low"));
+        assert_eq!(
+            pkg.security.as_ref().unwrap().risk_level.as_deref(),
+            Some("low")
+        );
         assert_eq!(pkg.sbom.as_ref().unwrap().license.as_deref(), Some("MIT"));
     }
 }

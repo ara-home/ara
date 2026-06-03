@@ -109,25 +109,32 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
 
     let valid_risk_levels = ["low", "medium", "high", "critical"];
 
-    let security = raw.security.map(|s| {
-        if let Some(ref threshold) = s.risk_threshold {
-            if !valid_risk_levels.contains(&threshold.as_str()) {
-                return Err(ManifestParseError::InvalidRiskLevel);
+    let security = raw
+        .security
+        .map(|s| {
+            if let Some(ref threshold) = s.risk_threshold {
+                if !valid_risk_levels.contains(&threshold.as_str()) {
+                    return Err(ManifestParseError::InvalidRiskLevel);
+                }
             }
-        }
-        Ok(Security {
-            risk_threshold: s.risk_threshold,
-            require_review: s.require_review,
-            allow_lifecycle_scripts: s.allow_lifecycle_scripts,
-            block_critical: s.block_critical,
+            Ok(Security {
+                risk_threshold: s.risk_threshold,
+                require_review: s.require_review,
+                allow_lifecycle_scripts: s.allow_lifecycle_scripts,
+                block_critical: s.block_critical,
+            })
         })
-    }).transpose()?;
+        .transpose()?;
 
-    let workspace = raw.workspace.and_then(|w| {
-        w.members.map(|members| Workspace { members })
+    let workspace = raw
+        .workspace
+        .and_then(|w| w.members.map(|members| Workspace { members }));
+
+    let scripts = raw.scripts.map_or_else(Vec::new, |map| {
+        map.into_iter()
+            .map(|(name, command)| ScriptEntry { name, command })
+            .collect()
     });
-
-    let scripts = raw.scripts.map_or_else(Vec::new, |map| map.into_iter().map(|(name, command)| ScriptEntry { name, command }).collect());
 
     let build = raw.build.map(|b| Build {
         hermetic: b.hermetic,

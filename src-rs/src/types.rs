@@ -612,7 +612,10 @@ mod tests {
 
     #[test]
     fn test_source_type_parse_and_format() {
-        assert_eq!("workspace".parse::<SourceType>().unwrap(), SourceType::Workspace);
+        assert_eq!(
+            "workspace".parse::<SourceType>().unwrap(),
+            SourceType::Workspace
+        );
         assert_eq!(SourceType::Registry.to_string(), "registry");
         assert!("unknown".parse::<SourceType>().is_err());
     }

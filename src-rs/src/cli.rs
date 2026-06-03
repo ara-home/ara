@@ -51,9 +51,7 @@ pub enum Commands {
     /// Run garbage collection on the store (not yet implemented)
     Gc,
     /// Trust a package (not yet implemented)
-    Trust {
-        package: String,
-    },
+    Trust { package: String },
 }
 
 impl Cli {
@@ -108,9 +106,16 @@ fn print_findings(findings: &[crate::types::Finding], risk_level: RiskLevel) {
         let color = severity_color(&f.severity.to_string());
         let label = severity_label(&f.severity.to_string());
         let location = f.location.as_deref().unwrap_or("-");
-        println!("  {color}{label:>8}{reset}  {:<20}  {:<25}  {}", f.pattern, location, f.description);
+        println!(
+            "  {color}{label:>8}{reset}  {:<20}  {:<25}  {}",
+            f.pattern, location, f.description
+        );
     }
-    println!("\n  Risk level: {}{}{reset}", severity_color(&risk_level.to_string()), risk_level);
+    println!(
+        "\n  Risk level: {}{}{reset}",
+        severity_color(&risk_level.to_string()),
+        risk_level
+    );
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -138,7 +143,20 @@ fn current_timestamp() -> String {
         y += 1;
     }
     let leap = is_leap(y);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
     for (i, &md) in month_days.iter().enumerate() {
         if remaining < i64::from(md) {
@@ -164,7 +182,10 @@ const fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-fn find_dep<'a>(deps: &'a [crate::manifest::types::DependencyEntry], name: &str) -> Option<&'a crate::manifest::types::DependencyEntry> {
+fn find_dep<'a>(
+    deps: &'a [crate::manifest::types::DependencyEntry],
+    name: &str,
+) -> Option<&'a crate::manifest::types::DependencyEntry> {
     deps.iter().find(|d| d.name == name)
 }
 
@@ -179,32 +200,50 @@ fn source_type_from_str(s: &str) -> SourceType {
     }
 }
 
-fn create_source(source_type: SourceType, dep: &crate::manifest::types::DependencyEntry) -> Result<Source> {
+fn create_source(
+    source_type: SourceType,
+    dep: &crate::manifest::types::DependencyEntry,
+) -> Result<Source> {
     Ok(match source_type {
         SourceType::Npm => {
             let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
-            Source::Npm(crate::source::registry::RegistrySource::new(url.to_string()))
+            Source::Npm(crate::source::registry::RegistrySource::new(
+                url.to_string(),
+            ))
         }
         SourceType::Registry => {
             let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
-            Source::Registry(crate::source::registry::RegistrySource::new(url.to_string()))
+            Source::Registry(crate::source::registry::RegistrySource::new(
+                url.to_string(),
+            ))
         }
         SourceType::Github => {
-            let repo = dep.repo.as_deref().context("missing repo for github source")?;
+            let repo = dep
+                .repo
+                .as_deref()
+                .context("missing repo for github source")?;
             Source::Github(crate::source::github::GithubSource::new(repo.to_string()))
         }
         SourceType::Git => {
             let url = dep.url.as_deref().context("missing url for git source")?;
             let commit = dep.commit.as_deref().unwrap_or("HEAD");
-            Source::Git(crate::source::git::GitSource::new(url.to_string(), commit.to_string()))
+            Source::Git(crate::source::git::GitSource::new(
+                url.to_string(),
+                commit.to_string(),
+            ))
         }
         SourceType::Local => {
-            let path = dep.path.as_deref().context("missing path for local source")?;
+            let path = dep
+                .path
+                .as_deref()
+                .context("missing path for local source")?;
             Source::Local(crate::source::local::LocalSource::new(path.to_string()))
         }
         SourceType::Workspace => {
             let path = dep.path.as_deref().unwrap_or(".");
-            Source::Workspace(crate::source::workspace::WorkspaceSource::new(path.to_string()))
+            Source::Workspace(crate::source::workspace::WorkspaceSource::new(
+                path.to_string(),
+            ))
         }
     })
 }
@@ -212,11 +251,17 @@ fn create_source(source_type: SourceType, dep: &crate::manifest::types::Dependen
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().context("failed to read tarball entries")? {
+    for entry in archive
+        .entries()
+        .context("failed to read tarball entries")?
+    {
         let mut entry = entry.context("failed to read tarball entry")?;
         let path = entry.path().context("failed to read entry path")?;
         let components: Vec<_> = path.components().collect();
-        let stripped = if components.first().map_or(false, |c| c.as_os_str() == "package") {
+        let stripped = if components
+            .first()
+            .map_or(false, |c| c.as_os_str() == "package")
+        {
             components.iter().skip(1).collect::<PathBuf>()
         } else {
             path.to_path_buf()
@@ -298,7 +343,10 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
 
     let m = parser::parse(&content).context("failed to parse ara.toml")?;
 
-    println!("Installing dependencies for {} v{}", m.project.name, m.project.version);
+    println!(
+        "Installing dependencies for {} v{}",
+        m.project.name, m.project.version
+    );
 
     if m.deps.is_empty() {
         println!("No dependencies to install");
@@ -349,12 +397,18 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
             let all_match = existing.packages.iter().all(|p| {
                 graph.find_node(&p.name).is_some_and(|idx| {
                     let n = &graph.nodes[idx];
-                    let v = format!("{}.{}.{}", n.version.major, n.version.minor, n.version.patch);
+                    let v = format!(
+                        "{}.{}.{}",
+                        n.version.major, n.version.minor, n.version.patch
+                    );
                     n.source.to_string() == p.source && v == p.version
                 })
             });
             if all_match && !graph.nodes.is_empty() {
-                let all_exist = graph.nodes.iter().all(|n| node_modules.join(&n.name).exists());
+                let all_exist = graph
+                    .nodes
+                    .iter()
+                    .all(|n| node_modules.join(&n.name).exists());
                 if all_exist {
                     println!("Lockfile is up to date. Nothing to install.");
                     return Ok(());
@@ -386,7 +440,10 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
     let mut pkg_entries: Vec<PackageEntry> = Vec::new();
 
     for node in &graph.nodes {
-        let ver_str = format!("{}.{}.{}", node.version.major, node.version.minor, node.version.patch);
+        let ver_str = format!(
+            "{}.{}.{}",
+            node.version.major, node.version.minor, node.version.patch
+        );
 
         let Some(dep) = find_dep(&m.deps, &node.name) else {
             println!("  skipped {}: no dependency config", node.name);
@@ -444,8 +501,16 @@ fn cmd_install_in(cwd: &std::path::Path) -> Result<()> {
                 let rl = result.risk_level;
                 let first = &result.findings[0];
                 let loc = first.location.as_deref().unwrap_or("");
-                print!("  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                    node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc);
+                print!(
+                    "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
+                    node.name,
+                    ver_str,
+                    hash_str,
+                    result.findings.len(),
+                    rl,
+                    first.description,
+                    loc
+                );
                 Some(SecurityMeta {
                     risk_level: Some(rl.to_string()),
                     analysis_version: Some("1.0.0".to_string()),
@@ -604,7 +669,9 @@ fn cmd_gc_in(store_base: &std::path::Path) -> Result<()> {
 // ── run command ────────────────────────────────────────────────────────────
 
 fn cmd_run(script: &str, profile: &str) -> Result<()> {
-    let profile: Profile = profile.parse().map_err(|e| anyhow::anyhow!("invalid profile: {e}"))?;
+    let profile: Profile = profile
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid profile: {e}"))?;
     println!("running: {script} ({profile:?})");
     let config = SandboxConfig::for_profile(profile);
     let executor = Executor::new(config);
@@ -733,14 +800,12 @@ mod tests {
 
     #[test]
     fn test_print_findings_does_not_crash() {
-        let findings = vec![
-            crate::types::Finding {
-                pattern: "eval-usage".into(),
-                severity: crate::types::RiskLevel::Critical,
-                location: Some("index.js:1".into()),
-                description: "eval detected".into(),
-            },
-        ];
+        let findings = vec![crate::types::Finding {
+            pattern: "eval-usage".into(),
+            severity: crate::types::RiskLevel::Critical,
+            location: Some("index.js:1".into()),
+            description: "eval detected".into(),
+        }];
         print_findings(&findings, crate::types::RiskLevel::Critical);
     }
 
@@ -813,7 +878,11 @@ mod tests {
 
         let mut index = std::collections::HashMap::new();
         index.insert("test-pkg@1.0.0".to_string(), "sha256-active".to_string());
-        std::fs::write(store_base.path().join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+        std::fs::write(
+            store_base.path().join("index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
 
         std::fs::write(objects.join("sha256-active"), b"content").unwrap();
         std::fs::write(objects.join("sha256-orphan"), b"orphan").unwrap();

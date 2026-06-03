@@ -2,7 +2,12 @@
 //!
 //! Communicates with the Zig host process via JSON-RPC over stdin/stdout.
 
-#![warn(clippy::pedantic, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![warn(
+    clippy::pedantic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 
 mod analysis;
 mod types;
@@ -109,7 +114,9 @@ fn handle_audit(req: &Request) -> Response {
                 format!(
                     "Found {} potential issue(s) with {} risk level.",
                     result.findings.len(),
-                    serde_json::to_string(&result.risk_level).unwrap_or_default().replace('\"', ""),
+                    serde_json::to_string(&result.risk_level)
+                        .unwrap_or_default()
+                        .replace('\"', ""),
                 )
             };
 

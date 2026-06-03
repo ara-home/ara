@@ -38,14 +38,13 @@ impl Executor {
         let status = child.wait()?;
 
         if !status.success() {
-            return Err(ExecutorError::Io(std::io::Error::other(
-                format!("command exited with: {status}"),
-            )));
+            return Err(ExecutorError::Io(std::io::Error::other(format!(
+                "command exited with: {status}"
+            ))));
         }
 
         Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +392,8 @@ fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
     for &sysno in allowed {
         filters.push(sock_filter {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 0,  // if equal, skip 0 instructions → execute next (which is ALLOW)
-            jf: 0,  // if not equal, skip 0 → continue to next check
+            jt: 0, // if equal, skip 0 instructions → execute next (which is ALLOW)
+            jf: 0, // if not equal, skip 0 → continue to next check
             k: sysno as u32,
         });
 
@@ -434,13 +433,7 @@ fn apply_seccomp(profile: Profile) -> Result<(), std::io::Error> {
         filter: filters.as_ptr(),
     };
 
-    let ret = unsafe {
-        libc::prctl(
-            PR_SET_SECCOMP,
-            SECCOMP_MODE_FILTER,
-            &raw const prog,
-        )
-    };
+    let ret = unsafe { libc::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const prog) };
 
     if ret != 0 {
         return Err(std::io::Error::last_os_error());

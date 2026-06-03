@@ -92,7 +92,9 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
         };
 
         // Verify candidate satisfies ALL constraints for this package
-        if pkg_constraints.iter().all(|con| con.satisfied_by(&candidate))
+        if pkg_constraints
+            .iter()
+            .all(|con| con.satisfied_by(&candidate))
             && best.as_ref().is_none_or(|b| candidate > *b)
         {
             best = Some(candidate);

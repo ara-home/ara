@@ -58,7 +58,8 @@ mod tests {
     use std::process::Command;
 
     fn create_git_repo(dir: &std::path::Path) {
-        Command::new("git").args(["init", "--initial-branch=main"])
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
             .arg(dir)
             .output()
             .unwrap();
@@ -109,7 +110,10 @@ mod tests {
 
     #[test]
     fn test_resolve_returns_commit() {
-        let src = GitSource::new("https://example.com/repo.git".to_string(), "abc123".to_string());
+        let src = GitSource::new(
+            "https://example.com/repo.git".to_string(),
+            "abc123".to_string(),
+        );
         assert_eq!(src.resolve("any").unwrap(), "abc123");
     }
 }

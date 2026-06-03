@@ -127,8 +127,13 @@ mod tests {
                 path: None,
                 package: None,
             }],
-            workspace: Some(Workspace { members: vec!["apps/*".into()] }),
-            scripts: vec![ScriptEntry { name: "build".into(), command: "tsc".into() }],
+            workspace: Some(Workspace {
+                members: vec!["apps/*".into()],
+            }),
+            scripts: vec![ScriptEntry {
+                name: "build".into(),
+                command: "tsc".into(),
+            }],
             security: Some(Security {
                 risk_threshold: Some("high".into()),
                 require_review: Some(true),
@@ -144,7 +149,10 @@ mod tests {
         assert_eq!(m.deps.len(), 1);
         assert_eq!(m.workspace.as_ref().unwrap().members.len(), 1);
         assert_eq!(m.scripts.len(), 1);
-        assert_eq!(m.security.as_ref().unwrap().risk_threshold.as_deref(), Some("high"));
+        assert_eq!(
+            m.security.as_ref().unwrap().risk_threshold.as_deref(),
+            Some("high")
+        );
         assert!(m.build.as_ref().unwrap().hermetic.unwrap());
     }
 

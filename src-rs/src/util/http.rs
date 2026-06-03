@@ -48,7 +48,8 @@ mod tests {
     fn test_http_client_get_200() {
         let mut server = mockito::Server::new();
         let url = server.url();
-        let mock = server.mock("GET", "/data")
+        let mock = server
+            .mock("GET", "/data")
             .with_status(200)
             .with_body("hello world")
             .create();
@@ -63,9 +64,7 @@ mod tests {
     fn test_http_client_get_404() {
         let mut server = mockito::Server::new();
         let url = server.url();
-        let mock = server.mock("GET", "/missing")
-            .with_status(404)
-            .create();
+        let mock = server.mock("GET", "/missing").with_status(404).create();
 
         let client = HttpClient::new().unwrap();
         let err = client.get(&format!("{url}/missing")).unwrap_err();

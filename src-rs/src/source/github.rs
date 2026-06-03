@@ -19,12 +19,17 @@ impl GithubSource {
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
-        let ver_str = format!("{}.{}.{}", identity.version.major, identity.version.minor, identity.version.patch);
+        let ver_str = format!(
+            "{}.{}.{}",
+            identity.version.major, identity.version.minor, identity.version.patch
+        );
         let url = format!(
             "https://api.github.com/repos/{repo}/tarball/v{ver_str}",
             repo = self.repo
         );
-        let body = client.get(&url).map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let body = client
+            .get(&url)
+            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
     }
 }

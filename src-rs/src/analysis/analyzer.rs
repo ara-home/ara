@@ -79,10 +79,7 @@ fn make_finding(pattern: &Pattern, location: String) -> Finding {
 }
 
 fn aggregate_risk_level<'a>(findings: impl Iterator<Item = &'a Finding>) -> RiskLevel {
-    findings
-        .map(|f| f.severity)
-        .max()
-        .unwrap_or(RiskLevel::Low)
+    findings.map(|f| f.severity).max().unwrap_or(RiskLevel::Low)
 }
 
 fn find_line_number(content: &str, byte_offset: usize) -> usize {
@@ -100,11 +97,7 @@ pub fn analyze_package(package_path: &Path) -> Result<AnalysisResult> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for file in &files {
-        let filename = file
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if filename == "package.json" {
             findings.extend(check_install_scripts(&file.content, &install_script_pat));
@@ -175,9 +168,7 @@ mod tests {
 
     #[test]
     fn test_multiple_findings() {
-        let dir = create_temp_package(&[
-            ("index.js", "eval(code);\nexec(cmd);\n"),
-        ]);
+        let dir = create_temp_package(&[("index.js", "eval(code);\nexec(cmd);\n")]);
         let result = analyze_package(dir.path()).unwrap();
         assert_eq!(result.risk_level, RiskLevel::Critical);
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
@@ -198,10 +189,7 @@ mod tests {
     fn test_tsx_file_scanned() {
         let dir = create_temp_package(&[("component.tsx", "new Function('return x');\n")]);
         let result = analyze_package(dir.path()).unwrap();
-        assert!(result
-            .findings
-            .iter()
-            .any(|f| f.pattern == "new-function"));
+        assert!(result.findings.iter().any(|f| f.pattern == "new-function"));
     }
 
     #[test]
@@ -275,20 +263,16 @@ mod tests {
 
     #[test]
     fn test_mjs_cjs_supported() {
-        let dir = create_temp_package(&[
-            ("module.mjs", "eval(x);\n"),
-            ("module.cjs", "eval(y);\n"),
-        ]);
+        let dir =
+            create_temp_package(&[("module.mjs", "eval(x);\n"), ("module.cjs", "eval(y);\n")]);
         let result = analyze_package(dir.path()).unwrap();
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
     }
 
     #[test]
     fn test_mts_cts_supported() {
-        let dir = create_temp_package(&[
-            ("module.mts", "eval(a);\n"),
-            ("module.cts", "eval(b);\n"),
-        ]);
+        let dir =
+            create_temp_package(&[("module.mts", "eval(a);\n"), ("module.cts", "eval(b);\n")]);
         let result = analyze_package(dir.path()).unwrap();
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
     }

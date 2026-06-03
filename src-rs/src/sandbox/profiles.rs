@@ -88,9 +88,7 @@ impl SandboxConfig {
                     enabled: true,
                     ..Default::default()
                 },
-                process: ProcessAccess {
-                    allow_spawn: true,
-                },
+                process: ProcessAccess { allow_spawn: true },
                 environment: EnvironmentAccess {
                     allowed_vars: vec!["*".to_string()],
                 },
@@ -155,7 +153,10 @@ mod tests {
     #[test]
     fn test_profile_from_string() {
         assert_eq!("open".parse::<Profile>().unwrap(), Profile::Open);
-        assert_eq!("restricted".parse::<Profile>().unwrap(), Profile::Restricted);
+        assert_eq!(
+            "restricted".parse::<Profile>().unwrap(),
+            Profile::Restricted
+        );
         assert_eq!("hermetic".parse::<Profile>().unwrap(), Profile::Hermetic);
         assert_eq!("custom".parse::<Profile>().unwrap(), Profile::Custom);
         assert!("unknown".parse::<Profile>().is_err());

@@ -41,12 +41,7 @@ impl Graph {
     /// Check for cycles using DFS.
     #[must_use]
     pub fn has_cycles(&self) -> bool {
-        fn dfs(
-            nodes: &[Node],
-            v: usize,
-            visited: &mut [bool],
-            stack: &mut [bool],
-        ) -> bool {
+        fn dfs(nodes: &[Node], v: usize, visited: &mut [bool], stack: &mut [bool]) -> bool {
             if stack[v] {
                 return true;
             }
