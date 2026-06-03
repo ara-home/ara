@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_has_cycles_detects_cycle() {
+    fn test_no_cycle_with_two_nodes() {
         let mut g = Graph::new();
         g.add_node(Node {
             name: "a".to_string(),
@@ -129,6 +129,66 @@ mod tests {
         });
         g.add_node(Node {
             name: "b".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("2.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec![],
+        });
+        assert!(!g.has_cycles());
+    }
+
+    #[test]
+    fn test_cycle_with_two_nodes() {
+        let mut g = Graph::new();
+        g.add_node(Node {
+            name: "a".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("1.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["b".to_string()],
+        });
+        g.add_node(Node {
+            name: "b".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("2.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["a".to_string()],
+        });
+        assert!(g.has_cycles());
+    }
+
+    #[test]
+    fn test_cycle_three_nodes() {
+        let mut g = Graph::new();
+        g.add_node(Node {
+            name: "a".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("1.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["b".to_string()],
+        });
+        g.add_node(Node {
+            name: "b".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("2.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["c".to_string()],
+        });
+        g.add_node(Node {
+            name: "c".to_string(),
+            source: SourceType::Npm,
+            version: Version::parse("3.0.0").unwrap(),
+            package_hash: None,
+            dependencies: vec!["a".to_string()],
+        });
+        assert!(g.has_cycles());
+    }
+
+    #[test]
+    fn test_self_loop() {
+        let mut g = Graph::new();
+        g.add_node(Node {
+            name: "a".to_string(),
             source: SourceType::Npm,
             version: Version::parse("1.0.0").unwrap(),
             package_hash: None,

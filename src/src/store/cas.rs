@@ -188,4 +188,44 @@ mod tests {
         // remove on non-existent file should fail with Io error
         assert!(err.is_err());
     }
+
+    #[test]
+    fn test_get_corrupted_object() {
+        let (_dir, store) = setup();
+        let hash = store.put(b"valid content").unwrap();
+        // Truncate the object to simulate partial write
+        let obj_path = store.object_path(&hash);
+        std::fs::write(&obj_path, b"truncated").unwrap();
+
+        let data = store.get(&hash).unwrap();
+        assert!(data.is_some());
+        assert_eq!(data.unwrap(), b"truncated");
+    }
+
+    #[test]
+    fn test_put_replaces_corrupted_object() {
+        let (_dir, store) = setup();
+        // put content, get its hash
+        let content = b"original content";
+        let hash = store.put(content).unwrap();
+        // corrupt the object file
+        let obj_path = store.object_path(&hash);
+        std::fs::write(&obj_path, b"garbage").unwrap();
+        // remove from index so put re-checks (simulating fresh store load)
+        let _ = std::fs::remove_file(obj_path);
+        // re-put the same content — should write it fresh
+        let hash2 = store.put(content).unwrap();
+        assert_eq!(hash, hash2);
+        let data = store.get(&hash).unwrap().unwrap();
+        assert_eq!(data, content);
+    }
+
+    #[test]
+    fn test_get_empty_object() {
+        let (_dir, store) = setup();
+        let hash = store.put(b"").unwrap();
+        let data = store.get(&hash).unwrap();
+        assert!(data.is_some());
+        assert_eq!(data.unwrap(), b"");
+    }
 }

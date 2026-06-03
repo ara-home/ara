@@ -303,4 +303,72 @@ mod tests {
         assert_eq!(m.scripts[1].name, "test");
         assert_eq!(m.scripts[1].command, "vitest");
     }
+
+    #[test]
+    fn test_parse_unicode_name() {
+        let src = r#"
+            [project]
+            name = "🔥-test-中文"
+            version = "0.1.0"
+        "#;
+        let m = parse(src).unwrap();
+        assert_eq!(m.project.name, "🔥-test-中文");
+    }
+
+    #[test]
+    fn test_parse_long_name() {
+        let name = "a".repeat(10_000);
+        let src = format!(
+            r#"
+            [project]
+            name = "{name}"
+            version = "0.1.0"
+        "#
+        );
+        let m = parse(&src).unwrap();
+        assert_eq!(m.project.name.len(), 10_000);
+    }
+
+    #[test]
+    fn test_parse_deeply_nested_table() {
+        let src = r#"
+            [project]
+            name = "weird"
+            version = "0.1.0"
+
+            [deps]
+            pkg = { source = "npm", version = "1.0.0" }
+
+            [a.b.c.d.e.f.g]
+            x = 1
+        "#;
+        parse(src).unwrap();
+    }
+
+    #[test]
+    fn test_parse_name_with_path_chars() {
+        let src = r#"
+            [project]
+            name = "../../etc/passwd"
+            version = "0.1.0"
+        "#;
+        let m = parse(src).unwrap();
+        assert_eq!(m.project.name, "../../etc/passwd");
+    }
+
+    #[test]
+    fn test_parse_huge_integer() {
+        let src = r#"
+            [project]
+            name = "bigint"
+            version = "0.1.0"
+
+            [security]
+            require_review = true
+        "#;
+        // TOML integers beyond i64 range cause parse error
+        let huge = format!("{src}\nhuge = 999999999999999999999999999");
+        let result = parse(&huge);
+        assert!(result.is_err());
+    }
 }

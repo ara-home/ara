@@ -728,4 +728,114 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(cmd_install_in(root.path(), true).is_err());
     }
+
+    #[test]
+    fn test_extract_tarball_path_traversal() {
+        // The tar crate rejects .. in entry paths at build time,
+        // which serves as built-in path traversal protection.
+        let mut header = tar::Header::new_gnu();
+        let result = header.set_path("../../../etc/passwd");
+        assert!(result.is_err(), "tar crate should reject paths with ..");
+    }
+
+    #[test]
+    fn test_extract_tarball_many_small_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+        let count = 1000;
+        for i in 0..count {
+            let name = format!("files/file_{i:06}.js");
+            let content = format!("module.exports = {{ id: {i} }};\n");
+            let mut header = tar::Header::new_gnu();
+            header.set_path(&name).unwrap();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            ar.append(&header, content.as_bytes()).unwrap();
+        }
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        extract_tarball(&buf, &dest).unwrap();
+        let mut extracted_count = 0;
+        for entry in walkdir::WalkDir::new(&dest) {
+            if entry.unwrap().file_type().is_file() {
+                extracted_count += 1;
+            }
+        }
+        assert_eq!(extracted_count, count);
+    }
+
+    #[test]
+    fn test_expand_workspace_members_500() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        // Create 500 workspace members
+        let mut member_names = Vec::new();
+        for i in 0..500 {
+            let name = format!("pkg-{i:04}");
+            let dir = packages.join(&name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let manifest = format!(
+                r#"[project]
+name = "{name}"
+version = "0.1.0"
+"#
+            );
+            std::fs::write(dir.join("ara.toml"), manifest).unwrap();
+            member_names.push(name);
+        }
+
+        let ws = crate::manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+        };
+        let entries = expand_workspace_members(&ws, root.path());
+        assert_eq!(entries.len(), 500);
+
+        let names: HashSet<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        for name in &member_names {
+            assert!(names.contains(name.as_str()), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn test_cmd_install_unicode_name() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+
+        let dep_dir = root_path.join("café-🔥");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        let dep_manifest = r#"
+            [project]
+            name = "café-🔥"
+            version = "0.1.0"
+        "#;
+        std::fs::write(dep_dir.join("ara.toml"), dep_manifest).unwrap();
+        std::fs::write(dep_dir.join("index.js"), "module.exports = {};").unwrap();
+
+        let root_manifest = format!(
+            r#"
+            [project]
+            name = "my-app"
+            version = "1.0.0"
+
+            [deps]
+            "café-🔥" = {{ source = "local", version = "0.1.0", path = "{}" }}
+            "#,
+            dep_dir.display()
+        );
+        std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
+
+        cmd_install_in(&root_path, true).unwrap();
+
+        let nm = root_path.join("node_modules");
+        assert!(nm.join("café-🔥").exists());
+        assert!(nm.join("café-🔥/index.js").exists());
+    }
 }

@@ -284,4 +284,85 @@ mod tests {
         assert!(paths.contains(&"module.mts"));
         assert!(paths.contains(&"module.cts"));
     }
+
+    #[test]
+    fn test_scanner_handles_broken_symlink() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "real.js", "console.log('ok')");
+        let broken = dir.path().join("broken.js");
+        let _ = std::os::unix::fs::symlink("/nonexistent_target", &broken);
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"real.js"));
+    }
+
+    #[test]
+    fn test_scanner_handles_symlink_escape() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "real.js", "console.log('ok')");
+        let outside = dir.path().join("escape.js");
+        let _ = std::os::unix::fs::symlink("/etc/passwd", &outside);
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"real.js"));
+    }
+
+    #[test]
+    fn test_scanner_skips_symlink_dir() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "real.js", "ok");
+        // Create target OUTSIDE the scanned directory
+        let target = tempfile::tempdir().unwrap();
+        write_file(target.path(), "inner.js", "should_not_appear");
+        let link = dir.path().join("link_dir");
+        let _ = std::os::unix::fs::symlink(target.path(), &link);
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["real.js"]);
+    }
+
+    #[test]
+    fn test_scanner_many_files() {
+        let dir = create_temp_dir();
+        // Create 2000 small JS files to stress-test the scanner
+        for i in 0..2000 {
+            let name = format!("batch/file_{i:06}.js");
+            write_file(dir.path(), &name, &format!("const x = {i};\n"));
+        }
+        // Add one real relevant file at root
+        write_file(dir.path(), "index.js", "console.log('ok')");
+
+        let files = scan_package(dir.path()).unwrap();
+        assert_eq!(files.len(), 2001);
+    }
+
+    #[test]
+    fn test_scanner_very_large_file_skipped() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "small.js", "ok");
+        // Create a file significantly over the 1 MB limit
+        // Using 2 MB to represent a "2 GB" scenario
+        let huge_path = dir.path().join("huge.js");
+        let huge_content = vec![b'x'; 2_000_000];
+        std::fs::write(&huge_path, huge_content).unwrap();
+
+        let files = scan_package(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].path.file_name().unwrap().to_str().unwrap(),
+            "small.js"
+        );
+    }
 }
