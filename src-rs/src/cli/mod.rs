@@ -7,8 +7,6 @@ pub(crate) mod install;
 mod prompt;
 mod run;
 
-// ── CLI definition ─────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 #[command(name = "ara", version, about = "Ara package manager")]
 pub struct Cli {

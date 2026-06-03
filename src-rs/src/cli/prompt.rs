@@ -56,7 +56,10 @@ pub(crate) fn prompt_allow_package(
     for f in findings {
         let color = severity_color(&f.severity.to_string());
         let label = severity_label(&f.severity.to_string());
-        println!("  {color}· {:<30} [{label}]{reset}  {}", f.description, f.pattern);
+        println!(
+            "  {color}· {:<30} [{label}]{reset}  {}",
+            f.description, f.pattern
+        );
     }
 
     loop {

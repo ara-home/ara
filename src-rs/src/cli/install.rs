@@ -12,9 +12,7 @@ use crate::source::Source;
 use crate::store::cas::Store;
 use crate::types::{Constraint, SourceType, Version};
 
-use super::prompt::{AllowDecision, prompt_allow_package};
-
-// ── helpers ────────────────────────────────────────────────────────────
+use super::prompt::{prompt_allow_package, AllowDecision};
 
 #[allow(clippy::cast_possible_wrap)]
 fn current_timestamp() -> String {
@@ -257,8 +255,6 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── install command ────────────────────────────────────────────────────
-
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
@@ -334,7 +330,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     let node_modules = cwd.join("node_modules");
 
-    // Step 5: Check lockfile for fast-path (skip if already up-to-date)
     let lock_path = cwd.join("ara.lock");
     if lock_path.exists() && node_modules.exists() {
         let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
@@ -367,7 +362,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let store = Store::new(store_base.clone());
     store.ensure_dirs()?;
 
-    // Step 2: Load store index for cache lookups
     let index_path = store_base.join("index.json");
     let mut store_index: HashMap<String, String> = if index_path.exists() {
         let idx_content = std::fs::read_to_string(&index_path)?;
@@ -405,7 +399,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
         let cache_key = format!("{}@{}", node.name, ver_str);
 
-        // Step 2: Check store cache before fetching
         let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
             if store.contains(cached_hash) {
                 if let Some(content) = store.get(cached_hash)? {
@@ -434,45 +427,53 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
             continue;
         }
 
-        // Step 4: Analyze package and capture security info
         let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
             Ok(result) => {
                 if result.findings.is_empty() {
                     print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
-                    (true, Some(SecurityMeta {
-                        risk_level: Some(result.risk_level.to_string()),
-                        analysis_version: Some("1.0.0".to_string()),
-                    }))
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(result.risk_level.to_string()),
+                            analysis_version: Some("1.0.0".to_string()),
+                        }),
+                    )
                 } else if non_interactive {
                     let rl = result.risk_level;
                     let first = &result.findings[0];
                     let loc = first.location.as_deref().unwrap_or("");
                     print!(
                         "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                        node.name, ver_str, hash_str, result.findings.len(), rl, first.description, loc
+                        node.name,
+                        ver_str,
+                        hash_str,
+                        result.findings.len(),
+                        rl,
+                        first.description,
+                        loc
                     );
-                    (true, Some(SecurityMeta {
-                        risk_level: Some(rl.to_string()),
-                        analysis_version: Some("1.0.0".to_string()),
-                    }))
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(rl.to_string()),
+                            analysis_version: Some("1.0.0".to_string()),
+                        }),
+                    )
                 } else {
                     match prompt_allow_package(&node.name, &ver_str, &result.findings) {
                         AllowDecision::Yes | AllowDecision::Sandbox => {
-                            println!(
-                                "  ✓ {}@{} ({}) — allowed",
-                                node.name, ver_str, hash_str
-                            );
-                            (true, Some(SecurityMeta {
-                                risk_level: Some(result.risk_level.to_string()),
-                                analysis_version: Some("1.0.0".to_string()),
-                            }))
+                            println!("  ✓ {}@{} ({}) — allowed", node.name, ver_str, hash_str);
+                            (
+                                true,
+                                Some(SecurityMeta {
+                                    risk_level: Some(result.risk_level.to_string()),
+                                    analysis_version: Some("1.0.0".to_string()),
+                                }),
+                            )
                         }
                         AllowDecision::No => {
                             let _ = std::fs::remove_dir_all(&pkg_dir);
-                            println!(
-                                "  ✗ {}@{} ({}) — denied",
-                                node.name, ver_str, hash_str
-                            );
+                            println!("  ✗ {}@{} ({}) — denied", node.name, ver_str, hash_str);
                             (false, None)
                         }
                     }
@@ -508,7 +509,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     // Save store index for future cache lookups
     std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
 
-    // Step 3: Store graph and populate graph_hash using compute_hash()
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
     let raw = graph.compute_hash();
