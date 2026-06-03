@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "ara-sec"
+    "ara-sec",
+    "src-rs"
 ]
 
 resolver = "2"

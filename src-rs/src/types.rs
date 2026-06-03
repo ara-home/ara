@@ -1,0 +1,660 @@
+use std::fmt;
+use std::str::FromStr;
+
+// ---------------------------------------------------------------------------
+// SourceType
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceType {
+    Workspace,
+    Local,
+    Git,
+    Github,
+    Registry,
+    Npm,
+}
+
+impl fmt::Display for SourceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Workspace => write!(f, "workspace"),
+            Self::Local => write!(f, "local"),
+            Self::Git => write!(f, "git"),
+            Self::Github => write!(f, "github"),
+            Self::Registry => write!(f, "registry"),
+            Self::Npm => write!(f, "npm"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown source type: '{0}'")]
+pub struct UnknownSourceType(pub String);
+
+impl FromStr for SourceType {
+    type Err = UnknownSourceType;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "workspace" => Ok(Self::Workspace),
+            "local" => Ok(Self::Local),
+            "git" => Ok(Self::Git),
+            "github" => Ok(Self::Github),
+            "registry" => Ok(Self::Registry),
+            "npm" => Ok(Self::Npm),
+            _ => Err(UnknownSourceType(s.to_owned())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub prerelease: Option<String>,
+    pub build: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VersionParseError {
+    #[error("empty version string")]
+    Empty,
+    #[error("invalid version format")]
+    InvalidFormat,
+    #[error("invalid numeric component in version")]
+    InvalidNumber,
+}
+
+fn parse_num(s: &mut &str) -> Result<u32, VersionParseError> {
+    if s.is_empty() {
+        return Err(VersionParseError::InvalidFormat);
+    }
+    let end = s.find(['.', '-', '+']).unwrap_or(s.len());
+    if end == 0 {
+        return Err(VersionParseError::InvalidFormat);
+    }
+    let num_str = &s[..end];
+    let num: u32 = num_str
+        .parse()
+        .map_err(|_| VersionParseError::InvalidNumber)?;
+    *s = &s[end..];
+    Ok(num)
+}
+
+impl Version {
+    pub fn parse(s: &str) -> Result<Self, VersionParseError> {
+        if s.is_empty() {
+            return Err(VersionParseError::Empty);
+        }
+
+        let mut rest = s;
+        let major = parse_num(&mut rest)?;
+
+        if rest.is_empty() || !rest.starts_with('.') {
+            return Err(VersionParseError::InvalidFormat);
+        }
+        rest = &rest[1..];
+
+        let minor = parse_num(&mut rest)?;
+
+        if rest.is_empty() || !rest.starts_with('.') {
+            return Err(VersionParseError::InvalidFormat);
+        }
+        rest = &rest[1..];
+
+        let patch = parse_num(&mut rest)?;
+
+        let mut prerelease: Option<String> = None;
+        let mut build: Option<String> = None;
+
+        if rest.starts_with('-') {
+            let end = rest.find('+').unwrap_or(rest.len());
+            prerelease = Some(rest[1..end].to_owned());
+            rest = &rest[end..];
+        }
+
+        if let Some(suffix) = rest.strip_prefix('+') {
+            build = Some(suffix.to_owned());
+        }
+
+        Ok(Self {
+            major,
+            minor,
+            patch,
+            prerelease,
+            build,
+        })
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(pr) = &self.prerelease {
+            write!(f, "-{pr}")?;
+        }
+        if let Some(b) = &self.build {
+            write!(f, "+{b}")?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.major.cmp(&other.major) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.minor.cmp(&other.minor) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.patch.cmp(&other.patch) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        match (&self.prerelease, &other.prerelease) {
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WildcardParts
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WildcardParts {
+    pub major: u32,
+    pub minor: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Constraint
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Constraint {
+    Exact(Version),
+    Caret(Version),
+    Tilde(Version),
+    GreaterOrEqual(Version),
+    GreaterThan(Version),
+    LessOrEqual(Version),
+    LessThan(Version),
+    Wildcard(WildcardParts),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConstraintParseError {
+    #[error("empty constraint string")]
+    Empty,
+    #[error(transparent)]
+    InvalidVersion(#[from] VersionParseError),
+}
+
+fn split_wildcard(s: &str) -> WildcardParts {
+    let dot = s.find('.');
+    let major_str = if let Some(d) = dot { &s[..d] } else { s };
+    let major = major_str.parse::<u32>().unwrap_or(0);
+
+    let minor = dot.and_then(|d| {
+        let rest = &s[d + 1..];
+        let second_dot = rest.find('.');
+        if let Some(sd) = second_dot {
+            rest[..sd].parse::<u32>().ok()
+        } else if rest.is_empty() || rest == "x" {
+            None
+        } else {
+            rest.parse::<u32>().ok()
+        }
+    });
+
+    WildcardParts { major, minor }
+}
+
+impl Constraint {
+    pub fn parse(s: &str) -> Result<Self, ConstraintParseError> {
+        if s.is_empty() {
+            return Err(ConstraintParseError::Empty);
+        }
+
+        let bytes = s.as_bytes();
+        if bytes[0] == b'^' {
+            return Ok(Self::Caret(Version::parse(&s[1..])?));
+        }
+        if bytes[0] == b'~' {
+            return Ok(Self::Tilde(Version::parse(&s[1..])?));
+        }
+        if bytes[0] == b'>' {
+            if s.len() > 1 && bytes[1] == b'=' {
+                return Ok(Self::GreaterOrEqual(Version::parse(&s[2..])?));
+            }
+            return Ok(Self::GreaterThan(Version::parse(&s[1..])?));
+        }
+        if bytes[0] == b'<' {
+            if s.len() > 1 && bytes[1] == b'=' {
+                return Ok(Self::LessOrEqual(Version::parse(&s[2..])?));
+            }
+            return Ok(Self::LessThan(Version::parse(&s[1..])?));
+        }
+
+        if s == "*" {
+            return Ok(Self::Wildcard(WildcardParts {
+                major: u32::MAX,
+                minor: None,
+            }));
+        }
+
+        if s.contains('x') {
+            return Ok(Self::Wildcard(split_wildcard(s)));
+        }
+
+        Ok(Self::Exact(Version::parse(s)?))
+    }
+
+    #[must_use]
+    pub fn satisfied_by(&self, version: &Version) -> bool {
+        match self {
+            Self::Exact(v) => version == v,
+            Self::Caret(v) => {
+                if version.major != v.major {
+                    return false;
+                }
+                if v.major == 0 {
+                    if v.minor != version.minor {
+                        return false;
+                    }
+                    return version.patch >= v.patch;
+                }
+                version >= v
+            }
+            Self::Tilde(v) => {
+                if version.major != v.major {
+                    return false;
+                }
+                if version.minor != v.minor {
+                    return false;
+                }
+                version.patch >= v.patch
+            }
+            Self::GreaterOrEqual(v) => version >= v,
+            Self::GreaterThan(v) => version > v,
+            Self::LessOrEqual(v) => version <= v,
+            Self::LessThan(v) => version < v,
+            Self::Wildcard(w) => {
+                if w.major == u32::MAX {
+                    return true;
+                }
+                if version.major != w.major {
+                    return false;
+                }
+                if let Some(m) = w.minor {
+                    if version.minor != m {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+impl fmt::Display for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(v) => write!(f, "{v}"),
+            Self::Caret(v) => write!(f, "^{v}"),
+            Self::Tilde(v) => write!(f, "~{v}"),
+            Self::GreaterOrEqual(v) => write!(f, ">={v}"),
+            Self::GreaterThan(v) => write!(f, ">{v}"),
+            Self::LessOrEqual(v) => write!(f, "<={v}"),
+            Self::LessThan(v) => write!(f, "<{v}"),
+            Self::Wildcard(w) => {
+                if w.major == u32::MAX {
+                    write!(f, "*")
+                } else if let Some(m) = w.minor {
+                    write!(f, "{}.{}.x", w.major, m)
+                } else {
+                    write!(f, "{}.x", w.major)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PackageIdentity
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageIdentity {
+    pub source: SourceType,
+    pub name: String,
+    pub version: Version,
+    pub content_hash: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// RiskLevel
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Version ----
+
+    #[test]
+    fn test_version_parse_basic() {
+        let v = Version::parse("1.2.3").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+        assert!(v.prerelease.is_none());
+        assert!(v.build.is_none());
+    }
+
+    #[test]
+    fn test_version_parse_prerelease() {
+        let v = Version::parse("1.2.3-alpha.1+build.42").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+        assert_eq!(v.prerelease.as_deref(), Some("alpha.1"));
+        assert_eq!(v.build.as_deref(), Some("build.42"));
+    }
+
+    #[test]
+    fn test_version_ordering() {
+        let v1 = Version::parse("1.2.3").unwrap();
+        let v2 = Version::parse("2.0.0").unwrap();
+        assert!(v1 < v2);
+        assert!(v2 > v1);
+        assert_eq!(v1, v1);
+    }
+
+    #[test]
+    fn test_version_ordering_with_prerelease() {
+        let release = Version::parse("1.0.0").unwrap();
+        let prerelease = Version::parse("1.0.0-rc.1").unwrap();
+        assert!(release > prerelease);
+        assert!(prerelease < release);
+        let same = Version::parse("1.0.0-rc.1").unwrap();
+        assert_eq!(prerelease, same);
+    }
+
+    #[test]
+    fn test_version_prerelease_edge_cases() {
+        let v = Version::parse("1.0.0-0").unwrap();
+        assert_eq!(v.prerelease.as_deref(), Some("0"));
+
+        let v2 = Version::parse("1.0.0+build").unwrap();
+        assert!(v2.prerelease.is_none());
+        assert_eq!(v2.build.as_deref(), Some("build"));
+
+        let v3 = Version::parse("1.0.0-rc.1+build.42").unwrap();
+        assert_eq!(v3.prerelease.as_deref(), Some("rc.1"));
+        assert_eq!(v3.build.as_deref(), Some("build.42"));
+    }
+
+    #[test]
+    fn test_version_invalid_inputs() {
+        assert!(Version::parse("").is_err());
+        assert!(Version::parse("1").is_err());
+        assert!(Version::parse("1.").is_err());
+        assert!(Version::parse("1.2").is_err());
+        assert!(Version::parse("1.2.").is_err());
+        assert!(Version::parse(".1.2.3").is_err());
+        assert!(Version::parse("a.b.c").is_err());
+
+        let v = Version::parse("1.2.3.").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+        assert!(v.prerelease.is_none());
+        assert!(v.build.is_none());
+    }
+
+    #[test]
+    fn test_version_overflow() {
+        assert!(Version::parse("9999999999999.0.0").is_err());
+    }
+
+    #[test]
+    fn test_version_display() {
+        let v = Version::parse("1.2.3-alpha.1+build.42").unwrap();
+        assert_eq!(v.to_string(), "1.2.3-alpha.1+build.42");
+
+        let v2 = Version::parse("1.0.0").unwrap();
+        assert_eq!(v2.to_string(), "1.0.0");
+    }
+
+    // ---- Constraint ----
+
+    #[test]
+    fn test_constraint_exact() {
+        let c = Constraint::parse("1.2.3").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.2.3").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("1.2.4").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_caret() {
+        let c = Constraint::parse("^1.2.3").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.5.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_caret_major_zero() {
+        let c = Constraint::parse("^0.1.2").unwrap();
+        assert!(c.satisfied_by(&Version::parse("0.1.2").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("0.1.9").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("0.2.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("1.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_tilde() {
+        let c = Constraint::parse("~1.2.3").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.2.3").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("1.2.9").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("1.3.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_greater_or_equal() {
+        let c = Constraint::parse(">=2.0.0").unwrap();
+        assert!(c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("3.0.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("1.9.9").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_greater_than() {
+        let c = Constraint::parse(">1.0.0").unwrap();
+        assert!(!c.satisfied_by(&Version::parse("1.0.0").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("1.0.1").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_less_than() {
+        let c = Constraint::parse("<2.0.0").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.9.9").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.1").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_less_or_equal() {
+        let c = Constraint::parse("<=2.0.0").unwrap();
+        assert!(c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("1.0.0").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.1").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_wildcard_star() {
+        let c = Constraint::parse("*").unwrap();
+        assert!(c.satisfied_by(&Version::parse("0.0.0").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("99.99.99").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_wildcard_minor() {
+        let c = Constraint::parse("1.2.x").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.2.0").unwrap()));
+        assert!(c.satisfied_by(&Version::parse("1.2.99").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("1.3.0").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_wildcard_major() {
+        let c = Constraint::parse("1.x").unwrap();
+        assert!(c.satisfied_by(&Version::parse("1.2.3").unwrap()));
+        assert!(!c.satisfied_by(&Version::parse("2.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_constraint_invalid_inputs() {
+        assert!(Constraint::parse("").is_err());
+        assert!(Constraint::parse("^").is_err());
+        assert!(Constraint::parse(">").is_err());
+        assert!(Constraint::parse("<").is_err());
+        assert!(Constraint::parse("~").is_err());
+        assert!(Constraint::parse(">=").is_err());
+        assert!(Constraint::parse("1.2.").is_err());
+    }
+
+    #[test]
+    fn test_constraint_display() {
+        let c = Constraint::parse("^1.2.3").unwrap();
+        assert_eq!(c.to_string(), "^1.2.3");
+
+        let c2 = Constraint::parse("*").unwrap();
+        assert_eq!(c2.to_string(), "*");
+    }
+
+    // ---- SourceType ----
+
+    #[test]
+    fn test_source_type_parse_and_format() {
+        assert_eq!("workspace".parse::<SourceType>().unwrap(), SourceType::Workspace);
+        assert_eq!(SourceType::Registry.to_string(), "registry");
+        assert!("unknown".parse::<SourceType>().is_err());
+    }
+
+    #[test]
+    fn test_source_type_all_roundtrip() {
+        let variants = [
+            SourceType::Workspace,
+            SourceType::Local,
+            SourceType::Git,
+            SourceType::Github,
+            SourceType::Registry,
+            SourceType::Npm,
+        ];
+        for variant in &variants {
+            let s = variant.to_string();
+            let parsed: SourceType = s.parse().unwrap();
+            assert_eq!(*variant, parsed);
+        }
+    }
+
+    // ---- RiskLevel ----
+
+    #[test]
+    fn test_risk_level_order() {
+        assert!(RiskLevel::Low < RiskLevel::Medium);
+        assert!(RiskLevel::Medium < RiskLevel::High);
+        assert!(RiskLevel::High < RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_risk_level_display() {
+        assert_eq!(RiskLevel::Low.to_string(), "low");
+        assert_eq!(RiskLevel::Critical.to_string(), "critical");
+    }
+
+    // ---- Generative ----
+
+    #[test]
+    fn test_version_generative_roundtrip() {
+        use std::num::Wrapping;
+
+        let mut rng = Wrapping(42u64);
+        for _ in 0..100 {
+            let major = (rng.0 % 101) as u32;
+            rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let minor = (rng.0 % 101) as u32;
+            rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let patch = (rng.0 % 101) as u32;
+            rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+
+            let s = format!("{major}.{minor}.{patch}");
+            let parsed = Version::parse(&s).unwrap();
+            assert_eq!(parsed.major, major);
+            assert_eq!(parsed.minor, minor);
+            assert_eq!(parsed.patch, patch);
+        }
+    }
+
+    #[test]
+    fn test_constraint_generative_parse_does_not_crash() {
+        use std::num::Wrapping;
+
+        let mut rng = Wrapping(1234u64);
+        for _ in 0..500 {
+            let len = (rng.0 % 21) as usize;
+            rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let mut buf = [0u8; 20];
+            for j in 0..len {
+                buf[j] = 32 + (rng.0 % 95) as u8;
+                rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            }
+            let input = std::str::from_utf8(&buf[..len]).unwrap_or("");
+            let _ = Constraint::parse(input);
+        }
+    }
+}
