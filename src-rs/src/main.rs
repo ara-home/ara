@@ -2,6 +2,7 @@ mod analysis;
 mod lockfile;
 mod manifest;
 mod resolver;
+mod sandbox;
 mod source;
 mod store;
 mod types;

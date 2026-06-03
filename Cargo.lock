@@ -30,6 +30,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "hex",
+ "libc",
  "regex",
  "reqwest",
  "serde",

@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::path::Path;
 
 use flate2::write::GzEncoder;
@@ -37,6 +36,7 @@ impl LocalSource {
 mod tests {
     use super::*;
     use crate::types::{SourceType, Version};
+    use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
 
