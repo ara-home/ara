@@ -15,8 +15,8 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
-# Enable manual release dispatch from GitHub UI
-dispatch-releases = true
+# Create releases by pushing a version tag (e.g. v0.1.0)
+dispatch-releases = false
 # Enable SLSA build provenance attestations
 github-attestations = true
 # Run 'dist plan' on PRs to detect breakage early
