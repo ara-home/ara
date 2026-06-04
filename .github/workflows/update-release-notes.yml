@@ -1,0 +1,47 @@
+name: Update Release Notes
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-notes:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46 # v2.81.2
+        with:
+          tool: git-cliff
+
+      - name: Extract tag from plan
+        id: tag
+        run: |
+          tag=$(echo '${{ inputs.plan }}' | jq -r '.announcement_tag')
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: cliff
+        run: |
+          notes=$(git-cliff --config cliff.toml --tag "${{ steps.tag.outputs.tag }}" --strip header --latest)
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$notes" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Update release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ steps.tag.outputs.tag }}" \
+            --notes "${{ steps.cliff.outputs.notes }}" \
+            --repo "${{ github.repository }}"
