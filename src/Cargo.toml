@@ -29,4 +29,4 @@ mockito = "1"
 
 [[bin]]
 name = "ara"
-path = "src/main.rs"
+path = "main.rs"
