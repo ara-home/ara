@@ -11,8 +11,14 @@ echo "  TEST   ara"
 }
 
 echo "  LINT   ara"
-(cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null && cargo fmt -- --check) || {
+(cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null) || {
     echo "  FAIL   ara clippy failed, commit blocked"
+    exit 1
+}
+
+echo " CHECK-FMT   ara"
+(cd src && cargo fmt -- --check) || {
+    echo "  FAIL   ara code is not formatted, commit blocked"
     exit 1
 }
 
