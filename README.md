@@ -1,0 +1,302 @@
+# Ara
+
+A dependency manager that actually thinks about security, so you don't have to.
+
+Ara is a modern package manager and build orchestrator built for the JavaScript and TypeScript ecosystem — but with a hard focus on determinism, security, and reproducibility. It takes lessons from Go Modules, pnpm, Nix, and Cargo, wraps them in a familiar CLI, and adds a built-in security analysis engine that inspects every dependency before it touches your project.
+
+Think of it as npm reimagined from scratch for an era where supply chain attacks are the norm, not the exception.
+
+---
+
+## What makes Ara different?
+
+### Security analysis baked in, not bolted on
+
+Every time you install a dependency, Ara scans its source files for suspicious patterns before unpacking them. It looks for eval() calls, child_process invocations, prototype pollution, credential access, obfuscated code, and a dozen other red flags — then shows you exactly what it found and asks for your decision before proceeding.
+
+```bash
+ara install
+```
+
+If a package tries to run `eval()` or access `process.binding()`, Ara tells you. Right there, in your terminal. Not in a CI pipeline you set up six months later.
+
+### Interactive prompts, non-interactive when you need it
+
+By default, Ara asks you to approve or deny each package with findings. For CI environments, just pass `--non-interactive` and it installs silently.
+
+```bash
+ara install --non-interactive
+```
+
+### Content-addressed storage
+
+Every package is stored by its SHA-256 hash, not by name and version. This means:
+- Identical packages are never duplicated
+- You can verify package integrity without external tooling
+- Rollbacks are trivial — the old hash still exists in the store
+
+### Deterministic resolution with MVS
+
+Ara uses Minimum Version Selection, inspired by Go Modules. Given the same manifest and lockfile, any machine produces the exact same dependency graph. No floating versions, no surprises.
+
+### Sandboxed script execution
+
+When you run a build or test script, Ara wraps it in a Linux seccomp-BPF filter that restricts what syscalls the process can make. Three profiles are available:
+
+- **Hermetic** — minimal syscall set, no network, deterministic clock (great for builds)
+- **Restricted** — safe syscalls, read-only filesystem, no network
+- **Open** — no restrictions (for trusted scripts)
+
+```bash
+ara run build --profile hermetic
+```
+
+### Multiple package sources
+
+Ara can resolve and fetch dependencies from npm registries, GitHub repositories, git repositories, local paths, and workspace members — all defined in a single manifest file.
+
+---
+
+## Architecture
+
+Ara is written in Rust and organized as a single binary with these core subsystems:
+
+```
+src/
+├── main.rs              # Entry point, CLI dispatch
+├── cli/                 # Install, run, analyze, audit, gc
+├── types.rs             # Version, Constraint, RiskLevel, SourceType
+├── manifest/            # Manifest (ara.toml) parsing and types
+├── lockfile/            # Lockfile types and generation
+├── resolver/            # MVS resolver + dependency graph with cycle detection
+├── source/              # Package source backends (npm, git, github, local, workspace)
+├── store/               # Content-addressable store (put/get by SHA-256)
+├── analysis/            # Security scanner + pattern-based analyzer
+├── sandbox/             # Seccomp-BPF sandbox execution profiles
+└── util/                # Hashing, HTTP client helpers
+```
+
+### The install flow
+
+1. **Parse** the manifest (`ara.toml`) to find project dependencies and their sources
+2. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
+3. **Fetch** tarballs from the appropriate source backend (registry, git, GitHub, local, workspace)
+4. **Analyze** every fetched package by scanning its source files against 16+ security patterns
+5. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
+6. **Extract** approved packages to the output directory and store them in the content-addressable store
+7. **Lock** the resolved graph into `ara.lock` for future reproducibility
+
+### The analysis engine
+
+The scanner walks every JavaScript, TypeScript, JSX, TSX, MJS, CJS, MTS, and CTS file in a package, skipping binary files, large files (>500 KB), and known ignore directories (`node_modules/`, `.git/`, `dist/`, etc.).
+
+The analyzer then runs each file through a set of compiled regex patterns. Currently it detects:
+
+| Pattern | Severity | What it catches |
+|---|---|---|
+| `eval-usage` | Critical | Arbitrary code execution via `eval()` |
+| `new-function` | Critical | Dynamic code creation via `new Function()` |
+| `child-process-exec` | High | Shell command execution, potential injection |
+| `child-process-require` | High | Import of `child_process` module |
+| `vm-escape` | High | VM sandbox escape methods |
+| `process-binding` | High | Access to native addons |
+| `prototype-pollution` | High | `__proto__` assignment |
+| `constructor-pollution` | High | `constructor.prototype` manipulation |
+| `credential-access` | High | Access to `process.env`, `AWS_*`, tokens |
+| `obfuscated-code` | Medium | Base64, hex-encoded, or compressed strings |
+| `dynamic-require` | Medium | `require()` with non-literal arguments |
+| `dynamic-import` | Medium | `import()` with potentially dynamic paths |
+| `deprecated-cipher` | Medium | Use of broken crypto (MD5, SHA1, RC4, DES) |
+| `weak-crypto` | Medium | `Math.random()` for security contexts |
+| `fs-dangerous-delete` | Medium | Recursive filesystem deletion |
+| `fs-dangerous-write` | Medium | Dangerous filesystem writes |
+| `install-scripts` | Medium | Pre/post-install scripts |
+
+Each finding produces a structured report. Findings are deduplicated per file and per pattern, so the same `eval()` call in the same line only generates one warning.
+
+---
+
+## CLI reference
+
+### `ara install`
+
+Install all dependencies from `ara.toml`. Resolves versions, fetches tarballs, scans for security issues, and writes `ara.lock`.
+
+```bash
+ara install                    # Interactive — prompts for suspicious packages
+ara install --non-interactive  # Silent — useful for CI
+```
+
+### `ara run <script> --profile <profile>`
+
+Run a script defined in `ara.toml` under a sandbox profile.
+
+```bash
+ara run build
+ara run test --profile restricted
+ara run build --profile hermetic
+```
+
+Profiles: `open` (or `runtime`), `restricted`, `hermetic`, `custom`.
+
+### `ara analyze [path]`
+
+Analyze a package (defaults to current directory) for security patterns and print findings to stdout.
+
+```bash
+ara analyze
+ara analyze ./some-package
+```
+
+### `ara audit [path]`
+
+Full security audit — same as `analyze` but with an extended report format.
+
+### `ara gc`
+
+Garbage-collect the content-addressable store (remove orphaned objects).
+
+### Coming soon
+
+- `ara build` — execute build steps with sandboxing and output hashing
+- `ara publish` — publish packages with signature verification
+- `ara trust <package>` — mark a package as trusted to skip future prompts
+
+---
+
+## Manifest format (`ara.toml`)
+
+```toml
+[project]
+name = "my-app"
+version = "0.1.0"
+
+[dependencies]
+zod = "^3.23.0"
+react = "18.2.0"
+lodash = { source = "npm", version = "4.17.21" }
+my-lib = { source = "workspace" }
+utils = { source = "local", path = "../utils" }
+cli-tool = { source = "github", repo = "user/cli-tool" }
+patcher = { source = "git", url = "https://github.com/user/patcher.git", commit = "abc123" }
+
+[workspace]
+members = ["packages/*"]
+```
+
+### Security options
+
+```toml
+[security]
+risk_threshold = "high"       # Only warn on High+ findings (low, medium, high, critical)
+require_review = true          # Always prompt for review
+```
+
+### Build options
+
+```toml
+[build]
+hermetic = true               # Run build in hermetic sandbox
+offline_first = true           # Prefer local cache over network
+```
+
+### Scripts
+
+```toml
+[scripts]
+build = "tsc"
+test = "vitest run"
+start = "node dist/index.js"
+```
+
+---
+
+## The lockfile (`ara.lock`)
+
+Ara generates a `ara.lock` after every successful install. It contains the full resolved dependency graph with hashes, sources, and versions — committed to your repository for reproducibility.
+
+```toml
+version = 1
+
+[graph]
+resolver = "mvs"
+generated_at = "2025-06-03T12:00:00Z"
+graph_hash = "sha256:abc123..."
+
+[[package]]
+name = "zod"
+version = "3.23.8"
+source = "npm"
+package_hash = "sha256:def456..."
+integrity = "sha256:ghi789..."
+dependencies = []
+```
+
+---
+
+## Inspirations
+
+Ara draws from projects that got it right:
+
+- **Go Modules** for MVS and deterministic resolution
+- **pnpm** for content-addressed storage and disk efficiency
+- **Nix** for reproducibility and hermetic builds
+- **Cargo** for its manifest format and developer experience
+- **npm** for, well, being the ecosystem we all know
+
+But Ara is not a clone of any of them. It's an experiment in what a package manager looks like when security, determinism, and developer experience are equal citizens from day one.
+
+---
+
+## Project status
+
+Ara is in early development. Core install, run, and analysis features work. Build, publish, SBOM generation, and LAN distribution are on the roadmap.
+
+---
+
+## Limitations
+
+Ara is honest about what it cannot do yet — or cannot do well.
+
+### Linux-only sandboxing
+
+The seccomp-BPF sandbox is Linux-specific and only supports x86_64 syscall numbers. On macOS or Windows, `ara run` degrades to running the script without restrictions. Cross-platform sandbox profiles depend on platform-specific primitives (or a VM layer) that have not been implemented.
+
+### npm ecosystem compatibility gap
+
+Ara speaks its own manifest and lockfile format. There is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import. Migrating an existing project to Ara means either writing `ara.toml` manually or building a converter. This limits real-world adoption until ecosystem bridges exist.
+
+### No private registry support
+
+Ara can fetch from public npm registries but does not handle authentication tokens, `.npmrc` credentials, or scoped private packages. If your workflow depends on a private registry, Ara will not work for you today.
+
+### Sequential downloads
+
+Packages are fetched one at a time during install. There is no concurrent download queue, no connection pooling, and no registry-side caching. Large projects with many dependencies install noticeably slower than npm or pnpm.
+
+### Limited constraint semantics
+
+Ara's version constraint parser handles the common cases (`^`, `~`, `>=`, `<=`, exact, wildcard) but does not support complex ranges like `>=1.0.0 <2.0.0`, `||` combinators, or prerelease-aware resolution. The MVS resolver picks the lowest matching version, which is correct for determinism but may disagree with npm's behavior on overlapping ranges.
+
+### No publish or distribution
+
+Ara cannot publish packages to npm, GitHub Packages, or any other registry. Publishing exists as a stub command only. This also means Ara cannot sign packages, generate provenance statements, or verify signatures from other publishers.
+
+### No lifecycle scripts
+
+Unlike npm's `preinstall`, `postinstall`, `prepare`, and friends, Ara does not run any package lifecycle scripts. This is intentional from a security perspective, but it means packages that rely on install-time code generation or native compilation will not work out of the box.
+
+### Single-binary, no library API
+
+Ara is compiled as a single binary with no stable Rust library interface. If you want to embed Ara's resolver or analyzer in your own tool, you would have to fork or shell out. There is no Cargo-like lib.rs separation.
+
+### x86_64 focus
+
+The content store and hash formats are architecture-agnostic, but the sandbox syscall tables are written for x86_64 Linux only. ARM64, RISC-V, and other architectures require their own syscall number tables, which do not exist yet.
+
+
+> These limitations may resolve themselves soon, don't worry, test the app, give feedback, contribute with issues and pull requests.
+
+---
+
+License: MIT
