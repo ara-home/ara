@@ -70,6 +70,8 @@ pub struct Manifest {
     pub security: Option<Security>,
     #[allow(dead_code)]
     pub build: Option<Build>,
+    #[allow(dead_code)]
+    pub package_json_extras: Option<String>,
 }
 
 #[cfg(test)]
@@ -136,6 +138,7 @@ mod tests {
                 hermetic: Some(true),
                 offline_first: None,
             }),
+            package_json_extras: None,
         };
         assert_eq!(m.project.name, "app");
         assert_eq!(m.deps.len(), 1);
