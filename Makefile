@@ -1,4 +1,4 @@
-.PHONY: all build bundle test test-e2e test-all lint-clean install-hooks
+.PHONY: all build bundle test test-e2e test-all lint audit deny ci clean install-hooks
 
 all: build build-sec
 
@@ -24,6 +24,19 @@ lint:
 	@echo "  LINT   ara"
 	@cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1
 	@cd src && cargo fmt --check 2>&1
+
+audit:
+	@echo "  AUDIT  ara"
+	@command -v cargo-audit >/dev/null 2>&1 || { echo "  SKIP   cargo-audit not installed (install with: cargo install cargo-audit)"; exit 0; }
+	@cd src && cargo audit 2>&1
+
+deny:
+	@echo "  DENY   ara"
+	@command -v cargo-deny >/dev/null 2>&1 || { echo "  SKIP   cargo-deny not installed (install with: cargo install cargo-deny)"; exit 0; }
+	@cargo deny --workspace check 2>&1
+
+ci: lint audit deny test
+	@echo "  CI     all checks passed"
 
 clean:
 	@rm -rf .bin target

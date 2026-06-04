@@ -32,10 +32,9 @@ impl Graph {
     }
 
     /// Compute a hash for the graph from serialized nodes.
-    #[must_use]
-    pub fn compute_hash(&self) -> [u8; 32] {
-        let serialized = serde_json::to_vec(&self.nodes).unwrap_or_default();
-        hash::compute(&serialized)
+    pub fn compute_hash(&self) -> Result<[u8; 32], serde_json::Error> {
+        let serialized = serde_json::to_vec(&self.nodes)?;
+        Ok(hash::compute(&serialized))
     }
 
     /// Check for cycles using DFS.
@@ -207,7 +206,7 @@ mod tests {
             package_hash: None,
             dependencies: Vec::new(),
         });
-        let hash = g.compute_hash();
+        let hash = g.compute_hash().unwrap();
         assert_eq!(hash.len(), 32);
         assert!(hash.iter().any(|&b| b != 0));
     }
@@ -268,6 +267,6 @@ mod tests {
     #[bench]
     fn bench_compute_hash_100(b: &mut test::Bencher) {
         let g = make_chain_graph(100);
-        b.iter(|| test::black_box(&g).compute_hash());
+        b.iter(|| test::black_box(&g).compute_hash().ok());
     }
 }

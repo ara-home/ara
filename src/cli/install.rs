@@ -499,7 +499,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
-    let raw = graph.compute_hash();
+    let raw = graph.compute_hash()?;
     let graph_hash = format!("sha256:{}", crate::util::hash::hex_encode(&raw));
     // Verify stored hash matches computed hash (sanity check)
     if !store_graph_hash.contains(&graph_hash[7..17]) {

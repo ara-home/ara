@@ -22,4 +22,20 @@ echo " CHECK-FMT   ara"
     exit 1
 }
 
+if command -v cargo-audit >/dev/null 2>&1; then
+    echo "  AUDIT  ara"
+    (cd src && cargo audit 2>/dev/null) || {
+        echo "  FAIL   ara audit failed, commit blocked"
+        exit 1
+    }
+fi
+
+if command -v cargo-deny >/dev/null 2>&1; then
+    echo "  DENY   ara"
+    (cargo deny --workspace check 2>/dev/null) || {
+        echo "  FAIL   ara deny failed, commit blocked"
+        exit 1
+    }
+fi
+
 echo "  PASS   all checks"

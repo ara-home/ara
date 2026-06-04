@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use crate::resolver::graph::{Graph, Node};
@@ -10,6 +8,7 @@ pub struct ConstraintEntry {
     pub package: String,
     pub constraint: Constraint,
     pub source: SourceType,
+    #[allow(dead_code)]
     pub required_by: String,
 }
 
@@ -95,7 +94,7 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
         if pkg_constraints
             .iter()
             .all(|con| con.satisfied_by(&candidate))
-            && best.as_ref().is_none_or(|b| candidate > *b)
+            && best.as_ref().is_none_or(|b| candidate < *b)
         {
             best = Some(candidate);
         }
@@ -142,6 +141,8 @@ mod tests {
         let graph = r.resolve();
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].name, "c");
+        // MVS selects the minimum version that satisfies all constraints
+        assert_eq!(graph.nodes[0].version, Version::parse("2.1.0").unwrap());
     }
 
     #[test]
@@ -198,6 +199,7 @@ mod tests {
         assert!(version.is_none());
     }
 
+    #[cfg(feature = "nightly-bench")]
     fn make_resolver_constraints(n: usize) -> Vec<ConstraintEntry> {
         let mut entries = Vec::with_capacity(n);
         for i in 0..n {
