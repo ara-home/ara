@@ -9,6 +9,7 @@ pub struct Project {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DepEntryRaw {
     pub source: Option<String>,
+    pub kind: Option<String>,
     pub version: Option<String>,
     pub repo: Option<String>,
     pub url: Option<String>,
@@ -20,6 +21,8 @@ pub struct DepEntryRaw {
 pub struct DependencyEntry {
     pub name: String,
     pub source: String,
+    #[allow(dead_code)]
+    pub kind: Option<String>,
     pub version: Option<String>,
     pub repo: Option<String>,
     pub url: Option<String>,
@@ -89,6 +92,7 @@ mod tests {
         let d = DependencyEntry {
             name: "zod".into(),
             source: "npm".into(),
+            kind: None,
             version: Some("^3.0.0".into()),
             repo: None,
             url: None,
@@ -97,6 +101,7 @@ mod tests {
         };
         assert_eq!(d.name, "zod");
         assert_eq!(d.version.as_deref(), Some("^3.0.0"));
+        assert!(d.kind.is_none());
     }
 
     #[test]
@@ -109,6 +114,7 @@ mod tests {
             deps: vec![DependencyEntry {
                 name: "react".into(),
                 source: "npm".into(),
+                kind: None,
                 version: Some("^18.0.0".into()),
                 repo: None,
                 url: None,

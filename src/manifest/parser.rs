@@ -87,6 +87,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                 Ok(DependencyEntry {
                     name,
                     source,
+                    kind: raw.kind,
                     version: raw.version,
                     repo: raw.repo,
                     url: raw.url,
@@ -291,6 +292,35 @@ mod tests {
         assert_eq!(m.scripts[0].command, "tsc");
         assert_eq!(m.scripts[1].name, "test");
         assert_eq!(m.scripts[1].command, "vitest");
+    }
+
+    #[test]
+    fn test_parse_with_kind_field() {
+        let src = r#"
+            [project]
+            name = "app"
+            version = "1.0.0"
+
+            [deps]
+            prod-dep = { version = "1.0.0" }
+            dev-dep = { version = "2.0.0", kind = "dev" }
+            peer-dep = { version = "3.0.0", kind = "peer" }
+            opt-dep = { version = "4.0.0", kind = "optional" }
+        "#;
+        let m = parse(src).unwrap();
+        assert_eq!(m.deps.len(), 4);
+
+        let prod = m.deps.iter().find(|d| d.name == "prod-dep").unwrap();
+        assert_eq!(prod.kind.as_deref(), None);
+
+        let dev = m.deps.iter().find(|d| d.name == "dev-dep").unwrap();
+        assert_eq!(dev.kind.as_deref(), Some("dev"));
+
+        let peer = m.deps.iter().find(|d| d.name == "peer-dep").unwrap();
+        assert_eq!(peer.kind.as_deref(), Some("peer"));
+
+        let opt = m.deps.iter().find(|d| d.name == "opt-dep").unwrap();
+        assert_eq!(opt.kind.as_deref(), Some("optional"));
     }
 
     #[test]
