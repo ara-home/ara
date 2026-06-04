@@ -4,9 +4,6 @@ unsound = "all"
 ignore = []
 
 [licenses]
-unlicensed = "deny"
-allow-osi-fsf-free = "neither"
-default = "deny"
 confidence-threshold = 0.8
 allow = [
     "MIT",
