@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::analysis::analyzer;
 use crate::lockfile::types::{GraphMeta, Lockfile, PackageEntry, SecurityMeta};
+use crate::manifest::package_json;
 use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
 use crate::source::Source;
@@ -78,6 +79,22 @@ fn create_source(
     })
 }
 
+fn read_member_manifest(member_dir: &Path) -> Option<crate::manifest::types::Manifest> {
+    let member_toml = member_dir.join("ara.toml");
+    if member_toml.exists() {
+        let content = std::fs::read_to_string(&member_toml).ok()?;
+        return parser::parse(&content).ok();
+    }
+
+    let member_pkg_json = member_dir.join("package.json");
+    if member_pkg_json.exists() {
+        let content = std::fs::read_to_string(&member_pkg_json).ok()?;
+        return package_json::parse_package_json(&content).ok();
+    }
+
+    None
+}
+
 fn expand_workspace_members(
     workspace: &crate::manifest::types::Workspace,
     cwd: &Path,
@@ -110,27 +127,13 @@ fn expand_workspace_members(
                 continue;
             }
 
-            let member_toml = entry.join("ara.toml");
-            if !member_toml.exists() {
-                eprintln!(
-                    "  warning: workspace member {} has no ara.toml, skipping",
-                    entry.display()
-                );
-                continue;
-            }
-
-            let content = match std::fs::read_to_string(&member_toml) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("  warning: cannot read {}: {e}", member_toml.display());
-                    continue;
-                }
-            };
-
-            let manifest = match parser::parse(&content) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("  warning: failed to parse {}: {e}", member_toml.display());
+            let manifest = match read_member_manifest(&entry) {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "  warning: workspace member {} has no manifest, skipping",
+                        entry.display()
+                    );
                     continue;
                 }
             };
@@ -188,14 +191,99 @@ pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     cmd_install_in(&cwd, non_interactive)
 }
 
+fn generate_ara_toml(m: &crate::manifest::types::Manifest) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "[project]\nname = \"{}\"\nversion = \"{}\"\n",
+        m.project.name, m.project.version
+    ));
+
+    if !m.deps.is_empty() {
+        out.push_str("\n[deps]\n");
+        for dep in &m.deps {
+            out.push_str(&format!("{} = {{ source = \"{}\"", dep.name, dep.source));
+            if let Some(kind) = &dep.kind {
+                out.push_str(&format!(", kind = \"{kind}\""));
+            }
+            if let Some(ver) = &dep.version {
+                out.push_str(&format!(", version = \"{ver}\""));
+            }
+            if let Some(repo) = &dep.repo {
+                out.push_str(&format!(", repo = \"{repo}\""));
+            }
+            if let Some(url) = &dep.url {
+                out.push_str(&format!(", url = \"{url}\""));
+            }
+            if let Some(commit) = &dep.commit {
+                out.push_str(&format!(", commit = \"{commit}\""));
+            }
+            if let Some(path) = &dep.path {
+                out.push_str(&format!(", path = \"{path}\""));
+            }
+            out.push_str(" }\n");
+        }
+    }
+
+    if let Some(ws) = &m.workspace {
+        out.push_str("\n[workspace]\nmembers = [");
+        for (i, member) in ws.members.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{member}\""));
+        }
+        out.push_str("]\n");
+    }
+
+    if !m.scripts.is_empty() {
+        out.push_str("\n[scripts]\n");
+        for script in &m.scripts {
+            out.push_str(&format!("{} = \"{}\"\n", script.name, script.command));
+        }
+    }
+
+    out
+}
+
+fn read_manifest(cwd: &Path) -> Result<crate::manifest::types::Manifest> {
+    let manifest_path = cwd.join("ara.toml");
+    let pkg_json_path = cwd.join("package.json");
+
+    if manifest_path.exists() {
+        let content = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let m = parser::parse(&content).context("failed to parse ara.toml")?;
+        return Ok(m);
+    }
+
+    if pkg_json_path.exists() {
+        let content = std::fs::read_to_string(&pkg_json_path)
+            .with_context(|| format!("failed to read {}", pkg_json_path.display()))?;
+        let m =
+            package_json::parse_package_json(&content).context("failed to parse package.json")?;
+
+        let ara_toml_content = generate_ara_toml(&m);
+        std::fs::write(&manifest_path, &ara_toml_content)
+            .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+
+        println!(
+            "No ara.toml found. Using package.json as manifest — generated {}",
+            manifest_path.display()
+        );
+
+        return Ok(m);
+    }
+
+    Err(anyhow::anyhow!(
+        "no manifest found: neither ara.toml nor package.json exists in {}",
+        cwd.display()
+    ))
+}
+
 #[allow(clippy::too_many_lines)]
 fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
-    let manifest_path = cwd.join("ara.toml");
-
-    let content = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("ara.toml not found at {}", manifest_path.display()))?;
-
-    let mut m = parser::parse(&content).context("failed to parse ara.toml")?;
+    let mut m = read_manifest(cwd)?;
 
     println!(
         "Installing dependencies for {} v{}",
@@ -717,6 +805,150 @@ version = "0.1.0"
         for name in &member_names {
             assert!(names.contains(name.as_str()), "missing {name}");
         }
+    }
+
+    #[test]
+    fn test_generate_ara_toml_minimal() {
+        let m = crate::manifest::types::Manifest {
+            project: crate::manifest::types::Project {
+                name: "app".into(),
+                version: "1.0.0".into(),
+            },
+            deps: vec![],
+            workspace: None,
+            scripts: vec![],
+            security: None,
+            build: None,
+            package_json_extras: None,
+        };
+        let out = generate_ara_toml(&m);
+        assert!(out.contains(r#"name = "app""#));
+        assert!(out.contains(r#"version = "1.0.0""#));
+    }
+
+    #[test]
+    fn test_generate_ara_toml_with_deps() {
+        let m = crate::manifest::types::Manifest {
+            project: crate::manifest::types::Project {
+                name: "app".into(),
+                version: "0.1.0".into(),
+            },
+            deps: vec![
+                crate::manifest::types::DependencyEntry {
+                    name: "zod".into(),
+                    source: "npm".into(),
+                    kind: Some("prod".into()),
+                    version: Some("^3.0.0".into()),
+                    repo: None,
+                    url: None,
+                    commit: None,
+                    path: None,
+                },
+                crate::manifest::types::DependencyEntry {
+                    name: "vitest".into(),
+                    source: "npm".into(),
+                    kind: Some("dev".into()),
+                    version: Some("^1.0.0".into()),
+                    repo: None,
+                    url: None,
+                    commit: None,
+                    path: None,
+                },
+            ],
+            workspace: None,
+            scripts: vec![],
+            security: None,
+            build: None,
+            package_json_extras: None,
+        };
+        let out = generate_ara_toml(&m);
+        assert!(out.contains(r#"zod"#));
+        assert!(out.contains(r#"vitest"#));
+        assert!(out.contains(r#"kind = "prod""#));
+        assert!(out.contains(r#"kind = "dev""#));
+        assert!(out.contains(r#"version = "^3.0.0""#));
+    }
+
+    #[test]
+    fn test_generate_ara_toml_with_scripts() {
+        let m = crate::manifest::types::Manifest {
+            project: crate::manifest::types::Project {
+                name: "app".into(),
+                version: "0.1.0".into(),
+            },
+            deps: vec![],
+            workspace: None,
+            scripts: vec![crate::manifest::types::ScriptEntry {
+                name: "build".into(),
+                command: "tsc".into(),
+            }],
+            security: None,
+            build: None,
+            package_json_extras: None,
+        };
+        let out = generate_ara_toml(&m);
+        assert!(out.contains("[scripts]"));
+        assert!(out.contains(r#"build = "tsc""#));
+    }
+
+    #[test]
+    fn test_read_manifest_with_package_json() {
+        let root = tempfile::tempdir().unwrap();
+        let pkg_json =
+            r#"{"name": "my-app", "version": "0.1.0", "dependencies": {"zod": "^3.0.0"}}"#;
+        std::fs::write(root.path().join("package.json"), pkg_json).unwrap();
+
+        let m = read_manifest(root.path()).unwrap();
+        assert_eq!(m.project.name, "my-app");
+        assert_eq!(m.deps.len(), 1);
+        assert_eq!(m.deps[0].name, "zod");
+
+        // Should have generated ara.toml
+        let ara_toml = std::fs::read_to_string(root.path().join("ara.toml")).unwrap();
+        assert!(ara_toml.contains(r#"name = "my-app""#));
+    }
+
+    #[test]
+    fn test_read_manifest_ara_toml_preferred() {
+        let root = tempfile::tempdir().unwrap();
+        // Both exist
+        let pkg_json = r#"{"name": "from-pkg-json", "version": "1.0.0"}"#;
+        std::fs::write(root.path().join("package.json"), pkg_json).unwrap();
+        let ara_toml = r#"[project]
+name = "from-ara-toml"
+version = "2.0.0"
+"#;
+        std::fs::write(root.path().join("ara.toml"), ara_toml).unwrap();
+
+        let m = read_manifest(root.path()).unwrap();
+        assert_eq!(m.project.name, "from-ara-toml");
+        assert_eq!(m.project.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_read_manifest_neither() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_manifest(root.path()).is_err());
+    }
+
+    #[test]
+    fn test_expand_workspace_members_with_package_json() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let member_dir = packages.join("pkg-a");
+        std::fs::create_dir_all(&member_dir).unwrap();
+
+        // Member with package.json instead of ara.toml
+        let member_json = r#"{"name": "pkg-a", "version": "0.1.0"}"#;
+        std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+        let ws = crate::manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+        };
+        let entries = expand_workspace_members(&ws, root.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "pkg-a");
+        assert_eq!(entries[0].version.as_deref(), Some("0.1.0"));
     }
 
     #[test]
