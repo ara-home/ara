@@ -66,7 +66,7 @@ src/
 ├── main.rs              # Entry point, CLI dispatch
 ├── cli/                 # Install, run, analyze, audit, gc
 ├── types.rs             # Version, Constraint, RiskLevel, SourceType
-├── manifest/            # Manifest (ara.toml) parsing and types
+├── manifest/            # Manifest parsing: ara.toml + package.json
 ├── lockfile/            # Lockfile types and generation
 ├── resolver/            # MVS resolver + dependency graph with cycle detection
 ├── source/              # Package source backends (npm, git, github, local, workspace)
@@ -78,7 +78,7 @@ src/
 
 ### The install flow
 
-1. **Parse** the manifest (`ara.toml`) to find project dependencies and their sources
+1. **Parse** the manifest — reads `ara.toml` by default, or auto-detects `package.json` (generating `ara.toml` transparently)
 2. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
 3. **Fetch** tarballs from the appropriate source backend (registry, git, GitHub, local, workspace)
 4. **Analyze** every fetched package by scanning its source files against 16+ security patterns
@@ -120,12 +120,14 @@ Each finding produces a structured report. Findings are deduplicated per file an
 
 ### `ara install`
 
-Install all dependencies from `ara.toml`. Resolves versions, fetches tarballs, scans for security issues, and writes `ara.lock`.
+Install all dependencies from `ara.toml` or `package.json`. If only `package.json` is found, Ara reads it natively and generates an `ara.toml` automatically. Resolves versions, fetches tarballs, scans for security issues, and writes `ara.lock`.
 
 ```bash
 ara install                    # Interactive — prompts for suspicious packages
 ara install --non-interactive  # Silent — useful for CI
 ```
+
+Works with existing npm projects out of the box — no migration step needed.
 
 ### `ara run <script> --profile <profile>`
 
@@ -164,7 +166,11 @@ Garbage-collect the content-addressable store (remove orphaned objects).
 
 ---
 
-## Manifest format (`ara.toml`)
+## Manifest format
+
+Ara supports two manifest formats: `ara.toml` (native) and `package.json` (via auto-detection).
+
+### `ara.toml`
 
 ```toml
 [project]
@@ -208,6 +214,22 @@ build = "tsc"
 test = "vitest run"
 start = "node dist/index.js"
 ```
+
+### `package.json` (auto-detected)
+
+Ara reads `package.json` natively when no `ara.toml` is present. All standard fields are mapped:
+
+| package.json field | ara.toml equivalent |
+|---|---|
+| `name` + `version` | `[project]` |
+| `dependencies` | `[deps]` with `kind = "prod"` |
+| `devDependencies` | `[deps]` with `kind = "dev"` |
+| `peerDependencies` | `[deps]` with `kind = "peer"` |
+| `optionalDependencies` | `[deps]` with `kind = "optional"` |
+| `scripts` | `[scripts]` |
+| `workspaces` | `[workspace]` members |
+
+When consumed, Ara generates an `ara.toml` transparently — no explicit migration command required. Non-mapped fields (`main`, `bin`, `exports`, `engines`, etc.) are preserved and re-emitted when generating `package.json` from `ara.toml`.
 
 ---
 
@@ -264,7 +286,7 @@ The seccomp-BPF sandbox is Linux-specific and only supports x86_64 syscall numbe
 
 ### npm ecosystem compatibility gap
 
-Ara speaks its own manifest and lockfile format. There is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import. Migrating an existing project to Ara means either writing `ara.toml` manually or building a converter. This limits real-world adoption until ecosystem bridges exist.
+Ara reads `package.json` natively and auto-generates `ara.toml`, so existing npm projects work out of the box. However, there is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import — Ara uses its own `ara.lock` format.
 
 ### No private registry support
 
