@@ -69,10 +69,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
             if version.is_empty() {
                 return Err(ManifestParseError::MissingProjectVersion);
             }
-            Project {
-                name,
-                version,
-            }
+            Project { name, version }
         }
         None => return Err(ManifestParseError::MissingProjectName),
     };

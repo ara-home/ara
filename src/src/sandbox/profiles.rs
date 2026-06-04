@@ -29,8 +29,7 @@ impl FromStr for Profile {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct FilesystemAccess {
-}
+pub struct FilesystemAccess {}
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkAccess {
@@ -38,8 +37,7 @@ pub struct NetworkAccess {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EnvironmentAccess {
-}
+pub struct EnvironmentAccess {}
 
 #[derive(Debug, Clone, Default)]
 pub struct ProcessAccess {
@@ -80,9 +78,7 @@ impl SandboxConfig {
         match profile {
             Profile::Open => Self {
                 profile,
-                network: NetworkAccess {
-                    enabled: true,
-                },
+                network: NetworkAccess { enabled: true },
                 process: ProcessAccess { allow_spawn: true },
                 ..Default::default()
             },
