@@ -54,132 +54,11 @@ impl FromStr for SourceType {
 }
 
 // ---------------------------------------------------------------------------
-// Version
+// Version (re-exported from the semver crate)
 // ---------------------------------------------------------------------------
 
 /// A semantic version (major.minor.patch) with optional prerelease and build metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Version {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub prerelease: Option<String>,
-    pub build: Option<String>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum VersionParseError {
-    #[error("empty version string")]
-    Empty,
-    #[error("invalid version format")]
-    InvalidFormat,
-    #[error("invalid numeric component in version")]
-    InvalidNumber,
-}
-
-fn parse_num(s: &mut &str) -> Result<u32, VersionParseError> {
-    if s.is_empty() {
-        return Err(VersionParseError::InvalidFormat);
-    }
-    let end = s.find(['.', '-', '+']).unwrap_or(s.len());
-    if end == 0 {
-        return Err(VersionParseError::InvalidFormat);
-    }
-    let num_str = &s[..end];
-    let num: u32 = num_str
-        .parse()
-        .map_err(|_| VersionParseError::InvalidNumber)?;
-    *s = &s[end..];
-    Ok(num)
-}
-
-impl Version {
-    pub fn parse(s: &str) -> Result<Self, VersionParseError> {
-        if s.is_empty() {
-            return Err(VersionParseError::Empty);
-        }
-
-        let mut rest = s;
-        let major = parse_num(&mut rest)?;
-
-        if rest.is_empty() || !rest.starts_with('.') {
-            return Err(VersionParseError::InvalidFormat);
-        }
-        rest = &rest[1..];
-
-        let minor = parse_num(&mut rest)?;
-
-        if rest.is_empty() || !rest.starts_with('.') {
-            return Err(VersionParseError::InvalidFormat);
-        }
-        rest = &rest[1..];
-
-        let patch = parse_num(&mut rest)?;
-
-        let mut prerelease: Option<String> = None;
-        let mut build: Option<String> = None;
-
-        if rest.starts_with('-') {
-            let end = rest.find('+').unwrap_or(rest.len());
-            prerelease = Some(rest[1..end].to_owned());
-            rest = &rest[end..];
-        }
-
-        if let Some(suffix) = rest.strip_prefix('+') {
-            build = Some(suffix.to_owned());
-        }
-
-        Ok(Self {
-            major,
-            minor,
-            patch,
-            prerelease,
-            build,
-        })
-    }
-}
-
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
-        if let Some(pr) = &self.prerelease {
-            write!(f, "-{pr}")?;
-        }
-        if let Some(b) = &self.build {
-            write!(f, "+{b}")?;
-        }
-        Ok(())
-    }
-}
-
-impl PartialOrd for Version {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Version {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.major.cmp(&other.major) {
-            std::cmp::Ordering::Equal => {}
-            ord => return ord,
-        }
-        match self.minor.cmp(&other.minor) {
-            std::cmp::Ordering::Equal => {}
-            ord => return ord,
-        }
-        match self.patch.cmp(&other.patch) {
-            std::cmp::Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        match (&self.prerelease, &other.prerelease) {
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            _ => std::cmp::Ordering::Equal,
-        }
-    }
-}
+pub use semver::Version;
 
 // ---------------------------------------------------------------------------
 // WildcardParts
@@ -187,8 +66,8 @@ impl Ord for Version {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildcardParts {
-    pub major: u32,
-    pub minor: Option<u32>,
+    pub major: u64,
+    pub minor: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,14 +91,14 @@ pub enum Constraint {
 pub enum ConstraintParseError {
     #[error("empty constraint string")]
     Empty,
-    #[error(transparent)]
-    InvalidVersion(#[from] VersionParseError),
+    #[error("invalid version: {0}")]
+    InvalidVersion(String),
 }
 
 fn split_wildcard(s: &str) -> WildcardParts {
     let dot = s.find('.');
     let major_str = dot.map_or(s, |d| &s[..d]);
-    let major = major_str.parse::<u32>().unwrap_or(0);
+    let major = major_str.parse::<u64>().unwrap_or(0);
 
     let minor = dot.and_then(|d| {
         let rest = &s[d + 1..];
@@ -229,10 +108,10 @@ fn split_wildcard(s: &str) -> WildcardParts {
                 if rest.is_empty() || rest == "x" {
                     None
                 } else {
-                    rest.parse::<u32>().ok()
+                    rest.parse::<u64>().ok()
                 }
             },
-            |sd| rest[..sd].parse::<u32>().ok(),
+            |sd| rest[..sd].parse::<u64>().ok(),
         )
     });
 
@@ -247,27 +126,40 @@ impl Constraint {
 
         let bytes = s.as_bytes();
         if bytes[0] == b'^' {
-            return Ok(Self::Caret(Version::parse(&s[1..])?));
+            return Ok(Self::Caret(semver::Version::parse(&s[1..]).map_err(
+                |e| ConstraintParseError::InvalidVersion(e.to_string()),
+            )?));
         }
         if bytes[0] == b'~' {
-            return Ok(Self::Tilde(Version::parse(&s[1..])?));
+            return Ok(Self::Tilde(semver::Version::parse(&s[1..]).map_err(
+                |e| ConstraintParseError::InvalidVersion(e.to_string()),
+            )?));
         }
         if bytes[0] == b'>' {
             if s.len() > 1 && bytes[1] == b'=' {
-                return Ok(Self::GreaterOrEqual(Version::parse(&s[2..])?));
+                return Ok(Self::GreaterOrEqual(
+                    semver::Version::parse(&s[2..])
+                        .map_err(|e| ConstraintParseError::InvalidVersion(e.to_string()))?,
+                ));
             }
-            return Ok(Self::GreaterThan(Version::parse(&s[1..])?));
+            return Ok(Self::GreaterThan(semver::Version::parse(&s[1..]).map_err(
+                |e| ConstraintParseError::InvalidVersion(e.to_string()),
+            )?));
         }
         if bytes[0] == b'<' {
             if s.len() > 1 && bytes[1] == b'=' {
-                return Ok(Self::LessOrEqual(Version::parse(&s[2..])?));
+                return Ok(Self::LessOrEqual(semver::Version::parse(&s[2..]).map_err(
+                    |e| ConstraintParseError::InvalidVersion(e.to_string()),
+                )?));
             }
-            return Ok(Self::LessThan(Version::parse(&s[1..])?));
+            return Ok(Self::LessThan(semver::Version::parse(&s[1..]).map_err(
+                |e| ConstraintParseError::InvalidVersion(e.to_string()),
+            )?));
         }
 
         if s == "*" {
             return Ok(Self::Wildcard(WildcardParts {
-                major: u32::MAX,
+                major: u64::MAX,
                 minor: None,
             }));
         }
@@ -276,7 +168,9 @@ impl Constraint {
             return Ok(Self::Wildcard(split_wildcard(s)));
         }
 
-        Ok(Self::Exact(Version::parse(s)?))
+        Ok(Self::Exact(semver::Version::parse(s).map_err(|e| {
+            ConstraintParseError::InvalidVersion(e.to_string())
+        })?))
     }
 
     #[must_use]
@@ -309,7 +203,7 @@ impl Constraint {
             Self::LessOrEqual(v) => version <= v,
             Self::LessThan(v) => version < v,
             Self::Wildcard(w) => {
-                if w.major == u32::MAX {
+                if w.major == u64::MAX {
                     return true;
                 }
                 if version.major != w.major {
@@ -337,7 +231,7 @@ impl fmt::Display for Constraint {
             Self::LessOrEqual(v) => write!(f, "<={v}"),
             Self::LessThan(v) => write!(f, "<{v}"),
             Self::Wildcard(w) => {
-                if w.major == u32::MAX {
+                if w.major == u64::MAX {
                     write!(f, "*")
                 } else if let Some(m) = w.minor {
                     write!(f, "{}.{}.x", w.major, m)
@@ -422,8 +316,8 @@ mod tests {
         assert_eq!(v.major, 1);
         assert_eq!(v.minor, 2);
         assert_eq!(v.patch, 3);
-        assert!(v.prerelease.is_none());
-        assert!(v.build.is_none());
+        assert!(v.pre.is_empty());
+        assert!(v.build.is_empty());
     }
 
     #[test]
@@ -432,8 +326,8 @@ mod tests {
         assert_eq!(v.major, 1);
         assert_eq!(v.minor, 2);
         assert_eq!(v.patch, 3);
-        assert_eq!(v.prerelease.as_deref(), Some("alpha.1"));
-        assert_eq!(v.build.as_deref(), Some("build.42"));
+        assert_eq!(v.pre.to_string(), "alpha.1");
+        assert_eq!(v.build.to_string(), "build.42");
     }
 
     #[test]
@@ -458,15 +352,15 @@ mod tests {
     #[test]
     fn test_version_prerelease_edge_cases() {
         let v = Version::parse("1.0.0-0").unwrap();
-        assert_eq!(v.prerelease.as_deref(), Some("0"));
+        assert_eq!(v.pre.to_string(), "0");
 
         let v2 = Version::parse("1.0.0+build").unwrap();
-        assert!(v2.prerelease.is_none());
-        assert_eq!(v2.build.as_deref(), Some("build"));
+        assert!(v2.pre.is_empty());
+        assert_eq!(v2.build.to_string(), "build");
 
         let v3 = Version::parse("1.0.0-rc.1+build.42").unwrap();
-        assert_eq!(v3.prerelease.as_deref(), Some("rc.1"));
-        assert_eq!(v3.build.as_deref(), Some("build.42"));
+        assert_eq!(v3.pre.to_string(), "rc.1");
+        assert_eq!(v3.build.to_string(), "build.42");
     }
 
     #[test]
@@ -478,18 +372,12 @@ mod tests {
         assert!(Version::parse("1.2.").is_err());
         assert!(Version::parse(".1.2.3").is_err());
         assert!(Version::parse("a.b.c").is_err());
-
-        let v = Version::parse("1.2.3.").unwrap();
-        assert_eq!(v.major, 1);
-        assert_eq!(v.minor, 2);
-        assert_eq!(v.patch, 3);
-        assert!(v.prerelease.is_none());
-        assert!(v.build.is_none());
+        assert!(Version::parse("1.2.3.").is_err());
     }
 
     #[test]
     fn test_version_overflow() {
-        assert!(Version::parse("9999999999999.0.0").is_err());
+        assert!(Version::parse("99999999999999999999.0.0").is_err());
     }
 
     #[test]
@@ -660,11 +548,11 @@ mod tests {
 
         let mut rng = Wrapping(42u64);
         for _ in 0..100 {
-            let major = (rng.0 % 101) as u32;
+            let major = rng.0 % 101;
             rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let minor = (rng.0 % 101) as u32;
+            let minor = rng.0 % 101;
             rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let patch = (rng.0 % 101) as u32;
+            let patch = rng.0 % 101;
             rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
 
             let s = format!("{major}.{minor}.{patch}");

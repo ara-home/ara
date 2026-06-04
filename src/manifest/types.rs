@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,19 +34,25 @@ pub struct Workspace {
 
 #[derive(Debug, Clone)]
 pub struct ScriptEntry {
+    #[allow(dead_code)]
     pub name: String,
+    #[allow(dead_code)]
     pub command: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Security {
+    #[allow(dead_code)]
     pub risk_threshold: Option<String>,
+    #[allow(dead_code)]
     pub require_review: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Build {
+    #[allow(dead_code)]
     pub hermetic: Option<bool>,
+    #[allow(dead_code)]
     pub offline_first: Option<bool>,
 }
 
@@ -57,8 +61,11 @@ pub struct Manifest {
     pub project: Project,
     pub deps: Vec<DependencyEntry>,
     pub workspace: Option<Workspace>,
+    #[allow(dead_code)]
     pub scripts: Vec<ScriptEntry>,
+    #[allow(dead_code)]
     pub security: Option<Security>,
+    #[allow(dead_code)]
     pub build: Option<Build>,
 }
 

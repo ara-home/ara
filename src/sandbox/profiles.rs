@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +31,7 @@ pub struct FilesystemAccess {}
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkAccess {
+    #[allow(dead_code)]
     pub enabled: bool,
 }
 
@@ -41,21 +40,28 @@ pub struct EnvironmentAccess {}
 
 #[derive(Debug, Clone, Default)]
 pub struct ProcessAccess {
+    #[allow(dead_code)]
     pub allow_spawn: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ClockAccess {
+    #[allow(dead_code)]
     pub deterministic: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub profile: Profile,
+    #[allow(dead_code)]
     pub filesystem: FilesystemAccess,
+    #[allow(dead_code)]
     pub network: NetworkAccess,
+    #[allow(dead_code)]
     pub environment: EnvironmentAccess,
+    #[allow(dead_code)]
     pub process: ProcessAccess,
+    #[allow(dead_code)]
     pub clock: ClockAccess,
 }
 

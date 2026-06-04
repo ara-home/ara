@@ -45,6 +45,18 @@ pub fn generate(lockfile: &Lockfile) -> String {
             }
             out.push_str("]\n");
         }
+        if let Some(sec) = &pkg.security {
+            out.push_str("[package.security]\n");
+            if let Some(rl) = &sec.risk_level {
+                let _ = writeln!(&mut out, "risk_level = \"{rl}\"");
+            }
+        }
+        if let Some(sbom) = &pkg.sbom {
+            out.push_str("[package.sbom]\n");
+            if let Some(lic) = &sbom.license {
+                let _ = writeln!(&mut out, "license = \"{lic}\"");
+            }
+        }
         out.push('\n');
     }
 
@@ -55,7 +67,7 @@ pub fn generate(lockfile: &Lockfile) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::lockfile::types::{GraphMeta, PackageEntry};
+    use crate::lockfile::types::{GraphMeta, PackageEntry, SbomMeta, SecurityMeta};
 
     #[test]
     fn test_generate_and_parse_back() {
@@ -110,8 +122,12 @@ mod tests {
                 repository: Some("facebook/react".to_string()),
                 commit: Some("abc123".to_string()),
                 dependencies: Some(vec!["shared".to_string()]),
-                security: None,
-                sbom: None,
+                security: Some(SecurityMeta {
+                    risk_level: Some("medium".to_string()),
+                }),
+                sbom: Some(SbomMeta {
+                    license: Some("MIT".to_string()),
+                }),
             }],
         };
 
@@ -119,5 +135,18 @@ mod tests {
         assert!(output.contains("facebook/react"));
         assert!(output.contains("abc123"));
         assert!(output.contains("shared"));
+        assert!(output.contains("risk_level"));
+        assert!(output.contains("medium"));
+        assert!(output.contains("license"));
+        assert!(output.contains("MIT"));
+
+        // Verify round-trip: generate -> parse preserves new fields
+        let parsed = crate::lockfile::parser::parse(&output).unwrap();
+        let pkg = &parsed.packages[0];
+        assert_eq!(
+            pkg.security.as_ref().unwrap().risk_level.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(pkg.sbom.as_ref().unwrap().license.as_deref(), Some("MIT"));
     }
 }

@@ -38,4 +38,12 @@ if command -v cargo-deny >/dev/null 2>&1; then
     }
 fi
 
+if command -v cargo-udeps >/dev/null 2>&1; then
+    echo "  UDPES  ara"
+    (cd src && cargo udeps 2>/dev/null) || {
+        echo "  FAIL   ara udeps failed, commit blocked"
+        exit 1
+    }
+fi
+
 echo "  PASS   all checks"

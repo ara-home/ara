@@ -14,66 +14,8 @@ use crate::types::{Constraint, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
-#[allow(clippy::cast_possible_wrap)]
 fn current_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    let mut y = 1970i64;
-    let mut remaining = days as i64;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let leap = is_leap(y);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 0usize;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining < i64::from(md) {
-            m = i;
-            break;
-        }
-        remaining -= i64::from(md);
-    }
-    let day = remaining + 1;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y,
-        m + 1,
-        day,
-        hours,
-        minutes,
-        seconds
-    )
-}
-
-const fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 fn find_dep<'a>(
@@ -99,13 +41,7 @@ fn create_source(
     dep: &crate::manifest::types::DependencyEntry,
 ) -> Result<Source> {
     Ok(match source_type {
-        SourceType::Npm => {
-            let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
-            Source::Npm(crate::source::registry::RegistrySource::new(
-                url.to_string(),
-            ))
-        }
-        SourceType::Registry => {
+        SourceType::Npm | SourceType::Registry => {
             let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
             Source::Registry(crate::source::registry::RegistrySource::new(
                 url.to_string(),
@@ -563,16 +499,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_leap() {
-        assert!(is_leap(2000));
-        assert!(!is_leap(1900));
-        assert!(is_leap(2024));
-        assert!(!is_leap(2023));
-        assert!(!is_leap(1970));
-        assert!(is_leap(2004));
-    }
-
-    #[test]
     fn test_current_timestamp_format() {
         let ts = current_timestamp();
         assert_eq!(ts.len(), 20, "expected ISO 8601 length, got: {ts}");
@@ -825,7 +751,7 @@ version = "0.1.0"
         assert!(nm.join("café-🔥/index.js").exists());
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "nightly-bench")]
     fn make_tarball(n: usize) -> Vec<u8> {
         let mut buf = Vec::new();
         let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());

@@ -1,4 +1,4 @@
-.PHONY: all build bundle test test-e2e test-all lint audit deny ci clean install-hooks
+.PHONY: all build bundle test test-e2e test-all lint audit deny udeps ci clean install-hooks
 
 all: build build-sec
 
@@ -35,7 +35,12 @@ deny:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "  SKIP   cargo-deny not installed (install with: cargo install cargo-deny)"; exit 0; }
 	@cargo deny --workspace check 2>&1
 
-ci: lint audit deny test
+udeps:
+	@echo "  UDPES  ara"
+	@command -v cargo-udeps >/dev/null 2>&1 || { echo "  SKIP   cargo-udeps not installed (install with: cargo install cargo-udeps)"; exit 0; }
+	@cd src && cargo udeps 2>&1
+
+ci: lint audit deny udeps test
 	@echo "  CI     all checks passed"
 
 clean:

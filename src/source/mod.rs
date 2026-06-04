@@ -1,8 +1,6 @@
 //! Package source implementations: local directories, workspace members,
 //! git repositories, GitHub archives, and npm/registry tarballs.
 
-#![allow(dead_code)]
-
 pub mod git;
 pub mod github;
 pub mod local;
@@ -31,7 +29,6 @@ pub enum Source {
     Git(git::GitSource),
     Github(github::GithubSource),
     Registry(registry::RegistrySource),
-    Npm(registry::RegistrySource),
 }
 
 impl Source {
@@ -41,7 +38,7 @@ impl Source {
             Self::Workspace(s) => s.resolve(name),
             Self::Git(s) => s.resolve(name),
             Self::Github(s) => s.resolve(name),
-            Self::Registry(s) | Self::Npm(s) => s.resolve(name),
+            Self::Registry(s) => s.resolve(name),
         }
     }
 
@@ -51,7 +48,7 @@ impl Source {
             Self::Workspace(s) => s.fetch(identity),
             Self::Git(s) => s.fetch(identity),
             Self::Github(s) => s.fetch(identity),
-            Self::Registry(s) | Self::Npm(s) => s.fetch(identity),
+            Self::Registry(s) => s.fetch(identity),
         }
     }
 }

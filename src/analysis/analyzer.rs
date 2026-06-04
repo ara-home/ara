@@ -276,7 +276,7 @@ mod tests {
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "nightly-bench")]
     fn create_bench_analysis_dir(n: usize) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..n {
