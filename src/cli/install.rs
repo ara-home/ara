@@ -148,6 +148,7 @@ fn expand_workspace_members(
             entries.push(crate::manifest::types::DependencyEntry {
                 name: manifest.project.name,
                 source: "workspace".to_string(),
+                kind: None,
                 version: Some(manifest.project.version),
                 path: Some(rel_path),
                 repo: None,
@@ -539,6 +540,7 @@ mod tests {
             crate::manifest::types::DependencyEntry {
                 name: "zod".into(),
                 source: "npm".into(),
+                kind: None,
                 version: Some("^3.0.0".into()),
                 repo: None,
                 url: None,
@@ -548,6 +550,7 @@ mod tests {
             crate::manifest::types::DependencyEntry {
                 name: "react".into(),
                 source: "npm".into(),
+                kind: None,
                 version: Some("^18.0.0".into()),
                 repo: None,
                 url: None,
