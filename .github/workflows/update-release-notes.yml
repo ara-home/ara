@@ -31,17 +31,13 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
-        id: cliff
         run: |
-          notes=$(git-cliff --config cliff.toml --tag "${{ steps.tag.outputs.tag }}" --strip header --latest)
-          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$notes" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          git-cliff --config cliff.toml --tag "${{ steps.tag.outputs.tag }}" --strip header --latest > /tmp/release-notes.md
 
       - name: Update release body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ steps.tag.outputs.tag }}" \
-            --notes "${{ steps.cliff.outputs.notes }}" \
+            --notes-file /tmp/release-notes.md \
             --repo "${{ github.repository }}"
