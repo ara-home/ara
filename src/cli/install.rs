@@ -191,35 +191,58 @@ pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     cmd_install_in(&cwd, non_interactive)
 }
 
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn generate_ara_toml(m: &crate::manifest::types::Manifest) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
         "[project]\nname = \"{}\"\nversion = \"{}\"\n",
-        m.project.name, m.project.version
+        toml_escape(&m.project.name),
+        toml_escape(&m.project.version)
     ));
 
     if !m.deps.is_empty() {
         out.push_str("\n[deps]\n");
         for dep in &m.deps {
-            out.push_str(&format!("{} = {{ source = \"{}\"", dep.name, dep.source));
+            out.push_str(&format!(
+                "\"{}\" = {{ source = \"{}\"",
+                toml_escape(&dep.name),
+                toml_escape(&dep.source)
+            ));
             if let Some(kind) = &dep.kind {
-                out.push_str(&format!(", kind = \"{kind}\""));
+                out.push_str(&format!(", kind = \"{}\"", toml_escape(kind)));
             }
             if let Some(ver) = &dep.version {
-                out.push_str(&format!(", version = \"{ver}\""));
+                out.push_str(&format!(", version = \"{}\"", toml_escape(ver)));
             }
             if let Some(repo) = &dep.repo {
-                out.push_str(&format!(", repo = \"{repo}\""));
+                out.push_str(&format!(", repo = \"{}\"", toml_escape(repo)));
             }
             if let Some(url) = &dep.url {
-                out.push_str(&format!(", url = \"{url}\""));
+                out.push_str(&format!(", url = \"{}\"", toml_escape(url)));
             }
             if let Some(commit) = &dep.commit {
-                out.push_str(&format!(", commit = \"{commit}\""));
+                out.push_str(&format!(", commit = \"{}\"", toml_escape(commit)));
             }
             if let Some(path) = &dep.path {
-                out.push_str(&format!(", path = \"{path}\""));
+                out.push_str(&format!(", path = \"{}\"", toml_escape(path)));
             }
             out.push_str(" }\n");
         }
@@ -231,7 +254,7 @@ fn generate_ara_toml(m: &crate::manifest::types::Manifest) -> String {
             if i > 0 {
                 out.push_str(", ");
             }
-            out.push_str(&format!("\"{member}\""));
+            out.push_str(&format!("\"{}\"", toml_escape(member)));
         }
         out.push_str("]\n");
     }
@@ -239,7 +262,11 @@ fn generate_ara_toml(m: &crate::manifest::types::Manifest) -> String {
     if !m.scripts.is_empty() {
         out.push_str("\n[scripts]\n");
         for script in &m.scripts {
-            out.push_str(&format!("{} = \"{}\"\n", script.name, script.command));
+            out.push_str(&format!(
+                "\"{}\" = \"{}\"\n",
+                toml_escape(&script.name),
+                toml_escape(&script.command)
+            ));
         }
     }
 
@@ -888,7 +915,7 @@ version = "0.1.0"
         };
         let out = generate_ara_toml(&m);
         assert!(out.contains("[scripts]"));
-        assert!(out.contains(r#"build = "tsc""#));
+        assert!(out.contains(r#""build" = "tsc""#));
     }
 
     #[test]

@@ -23,7 +23,7 @@ struct PackageJsonRaw {
     peerDependencies: Option<BTreeMap<String, String>>,
     optionalDependencies: Option<BTreeMap<String, String>>,
     scripts: Option<BTreeMap<String, String>>,
-    workspaces: Option<Vec<String>>,
+    workspaces: Option<serde_json::Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
@@ -105,7 +105,32 @@ pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError>
         }
     }
 
-    let workspace = raw.workspaces.map(|members| Workspace { members });
+    let workspace = match raw.workspaces {
+        Some(serde_json::Value::Array(arr)) => {
+            let members: Vec<String> = arr
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            if members.is_empty() {
+                None
+            } else {
+                Some(Workspace { members })
+            }
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            obj.get("packages").and_then(|v| v.as_array()).map(|pkgs| {
+                let members: Vec<String> = pkgs
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                Workspace { members }
+            })
+        }
+        _ => None,
+    };
 
     let scripts = raw.scripts.map_or_else(Vec::new, |map| {
         map.into_iter()
