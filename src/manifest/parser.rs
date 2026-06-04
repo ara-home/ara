@@ -14,6 +14,9 @@ pub enum ManifestParseError {
     UnknownSourceType,
     #[error("invalid risk level")]
     InvalidRiskLevel,
+    #[allow(dead_code)]
+    #[error("json parse error: {0}")]
+    Json(String),
     #[error("toml parse error: {0}")]
     Toml(#[from] toml::de::Error),
 }
@@ -138,6 +141,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
         scripts,
         security,
         build,
+        package_json_extras: None,
     })
 }
 
