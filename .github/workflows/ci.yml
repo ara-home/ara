@@ -42,7 +42,6 @@ jobs:
         run: cargo fmt --check
 
       - name: Audit
-        working-directory: src
         run: cargo audit
 
       - name: Deny
