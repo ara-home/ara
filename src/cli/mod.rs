@@ -8,7 +8,7 @@ mod prompt;
 mod run;
 
 #[derive(Parser)]
-#[command(name = "ara", version, about = "Ara package manager")]
+#[command(name = "ara", version = crate::version::VERSION, about = "Ara package manager")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

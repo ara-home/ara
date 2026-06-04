@@ -22,8 +22,12 @@ test-all: test test test-e2e
 
 lint:
 	@echo "  LINT   ara"
-	@cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>&1
+	@cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::cargo -A clippy::multiple_crate_versions 2>&1
 	@cd src && cargo fmt --check 2>&1
+
+lint-pedantic:
+	@echo "  LINT   pedantic"
+	@cd src && cargo clippy -- -W clippy::pedantic 2>&1
 
 audit:
 	@echo "  AUDIT  ara"

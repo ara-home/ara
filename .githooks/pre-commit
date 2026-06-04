@@ -11,7 +11,7 @@ echo "  TEST   ara"
 }
 
 echo "  LINT   ara"
-(cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic 2>/dev/null) || {
+(cd src && cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::cargo 2>/dev/null) || {
     echo "  FAIL   ara clippy failed, commit blocked"
     exit 1
 }

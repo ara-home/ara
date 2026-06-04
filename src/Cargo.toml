@@ -2,6 +2,12 @@
 name = "ara"
 version = "0.1.0"
 edition = "2021"
+description = "A dependency manager with built-in security analysis"
+license = "MIT"
+repository = "https://github.com/carlosedujs/ara"
+readme = "../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

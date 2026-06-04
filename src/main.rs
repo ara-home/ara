@@ -13,6 +13,7 @@ mod source;
 mod store;
 mod types;
 mod util;
+mod version;
 
 use clap::Parser;
 

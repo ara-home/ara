@@ -1,11 +1,16 @@
 use std::time::Duration;
 
+const MAX_RETRIES: u32 = 3;
+const BASE_DELAY_MS: u64 = 100;
+
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("non-success status: {0}")]
     StatusNotOk(reqwest::StatusCode),
+    #[error("max retries exceeded")]
+    MaxRetries,
 }
 
 pub struct HttpClient {
@@ -21,14 +26,42 @@ impl HttpClient {
         Ok(Self { client })
     }
 
-    pub fn get(&self, url: &str) -> Result<Vec<u8>, HttpError> {
-        let resp = self.client.get(url).send()?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(HttpError::StatusNotOk(status));
+    fn should_retry(status: Option<reqwest::StatusCode>) -> bool {
+        match status {
+            None => true,
+            Some(s) => s.is_server_error(),
         }
-        let body = resp.bytes()?.to_vec();
-        Ok(body)
+    }
+
+    pub fn get(&self, url: &str) -> Result<Vec<u8>, HttpError> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(BASE_DELAY_MS * (1 << attempt)));
+            }
+
+            match self.client.get(url).send() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp.bytes()?.to_vec());
+                    }
+                    if !Self::should_retry(Some(status)) {
+                        return Err(HttpError::StatusNotOk(status));
+                    }
+                    last_error = Some(HttpError::StatusNotOk(status));
+                }
+                Err(e) => {
+                    if !Self::should_retry(None) {
+                        return Err(HttpError::Request(e));
+                    }
+                    last_error = Some(HttpError::Request(e));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(HttpError::MaxRetries))
     }
 }
 

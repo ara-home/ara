@@ -9,8 +9,15 @@ use crate::util::hash;
 pub enum StoreError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("path contains null byte")]
-    NullByte,
+    #[error("invalid store key: {0}")]
+    InvalidKey(String),
+}
+
+fn validate_key(key: &str) -> Result<(), StoreError> {
+    if key.contains('\0') || key.contains('/') || key.contains('\\') || key.contains("..") {
+        return Err(StoreError::InvalidKey(key.to_string()));
+    }
+    Ok(())
 }
 
 pub struct Store {
@@ -58,9 +65,7 @@ impl Store {
     }
 
     pub fn get(&self, hash_str: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        if hash_str.contains('\0') {
-            return Err(StoreError::NullByte);
-        }
+        validate_key(hash_str)?;
         let path = self.object_path(hash_str);
         match std::fs::read(&path) {
             Ok(data) => Ok(Some(data)),
@@ -71,16 +76,11 @@ impl Store {
 
     #[must_use]
     pub fn contains(&self, hash_str: &str) -> bool {
-        if hash_str.contains('\0') {
-            return false;
-        }
-        self.object_path(hash_str).exists()
+        validate_key(hash_str).is_ok() && self.object_path(hash_str).exists()
     }
 
     pub fn remove(&self, hash_str: &str) -> Result<(), StoreError> {
-        if hash_str.contains('\0') {
-            return Err(StoreError::NullByte);
-        }
+        validate_key(hash_str)?;
         let path = self.object_path(hash_str);
         std::fs::remove_file(&path)?;
         Ok(())
@@ -160,23 +160,40 @@ mod tests {
     }
 
     #[test]
-    fn test_get_rejects_null_byte() {
+    fn test_get_rejects_invalid_key() {
         let (_dir, store) = setup();
-        let err = store.get("sha256-\0invalid").unwrap_err();
-        assert!(matches!(err, StoreError::NullByte));
+        assert!(matches!(
+            store.get("sha256-\0invalid"),
+            Err(StoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.get("../etc/passwd"),
+            Err(StoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.get("foo/bar"),
+            Err(StoreError::InvalidKey(_))
+        ));
     }
 
     #[test]
-    fn test_contains_rejects_null_byte() {
+    fn test_contains_rejects_invalid_key() {
         let (_dir, store) = setup();
         assert!(!store.contains("sha256-\0invalid"));
+        assert!(!store.contains("../etc/passwd"));
     }
 
     #[test]
-    fn test_remove_rejects_null_byte() {
+    fn test_remove_rejects_invalid_key() {
         let (_dir, store) = setup();
-        let err = store.remove("sha256-\0invalid").unwrap_err();
-        assert!(matches!(err, StoreError::NullByte));
+        assert!(matches!(
+            store.remove("sha256-\0invalid"),
+            Err(StoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.remove("../etc/passwd"),
+            Err(StoreError::InvalidKey(_))
+        ));
     }
 
     #[test]
