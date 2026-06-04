@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2.9.1
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Test
+        working-directory: src
+        run: cargo test --quiet
+
+      - name: Clippy
+        working-directory: src
+        run: cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::cargo -A clippy::multiple_crate_versions
+
+      - name: Format
+        working-directory: src
+        run: cargo fmt --check
+
+      - name: Audit
+        working-directory: src
+        run: cargo audit
+
+      - name: Deny
+        run: cargo deny --workspace check
+
+  udeps:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2.9.1
+
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+
+      - name: UDeps
+        working-directory: src
+        run: cargo udeps
