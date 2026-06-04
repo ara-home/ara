@@ -197,4 +197,43 @@ mod tests {
         let version = select_version(&constraints, "missing");
         assert!(version.is_none());
     }
+
+    fn make_resolver_constraints(n: usize) -> Vec<ConstraintEntry> {
+        let mut entries = Vec::with_capacity(n);
+        for i in 0..n {
+            entries.push(ConstraintEntry {
+                package: format!("pkg-{i:04}"),
+                constraint: Constraint::parse(">=1.0.0").unwrap(),
+                source: SourceType::Npm,
+                required_by: "root".to_string(),
+            });
+        }
+        entries
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_resolve_100(b: &mut test::Bencher) {
+        let entries = make_resolver_constraints(100);
+        b.iter(|| {
+            let mut r = Resolver::new();
+            for e in &entries {
+                r.add_constraint(e.clone());
+            }
+            r.resolve();
+        });
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_resolve_500(b: &mut test::Bencher) {
+        let entries = make_resolver_constraints(500);
+        b.iter(|| {
+            let mut r = Resolver::new();
+            for e in &entries {
+                r.add_constraint(e.clone());
+            }
+            r.resolve();
+        });
+    }
 }

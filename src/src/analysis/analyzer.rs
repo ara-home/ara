@@ -276,4 +276,32 @@ mod tests {
         let result = analyze_package(dir.path()).unwrap();
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
     }
+
+    fn create_bench_analysis_dir(n: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..n {
+            let name = format!("src/file_{i:06}.js");
+            let content = format!("const x = {i};\neval(x);\n");
+            let full = dir.path().join(&name);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, content).unwrap();
+        }
+        dir
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_analyze_100(b: &mut test::Bencher) {
+        let dir = create_bench_analysis_dir(100);
+        b.iter(|| analyze_package(test::black_box(dir.path())).unwrap());
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_analyze_1000(b: &mut test::Bencher) {
+        let dir = create_bench_analysis_dir(1000);
+        b.iter(|| analyze_package(test::black_box(dir.path())).unwrap());
+    }
 }

@@ -211,4 +211,61 @@ mod tests {
         assert_eq!(hash.len(), 32);
         assert!(hash.iter().any(|&b| b != 0));
     }
+
+    fn make_chain_graph(n: usize) -> Graph {
+        let mut g = Graph::new();
+        for i in 0..n {
+            let name = format!("pkg-{i:04}");
+            let deps = if i + 1 < n {
+                vec![format!("pkg-{:04}", i + 1)]
+            } else {
+                vec![]
+            };
+            g.add_node(Node {
+                name,
+                source: SourceType::Npm,
+                version: Version::parse("1.0.0").unwrap(),
+                package_hash: None,
+                dependencies: deps,
+            });
+        }
+        g
+    }
+
+    fn make_cyclic_graph(n: usize) -> Graph {
+        let mut g = Graph::new();
+        for i in 0..n {
+            let name = format!("pkg-{i:04}");
+            let deps = vec![format!("pkg-{:04}", (i + 1) % n)];
+            g.add_node(Node {
+                name,
+                source: SourceType::Npm,
+                version: Version::parse("1.0.0").unwrap(),
+                package_hash: None,
+                dependencies: deps,
+            });
+        }
+        g
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_has_cycles_chain_100(b: &mut test::Bencher) {
+        let g = make_chain_graph(100);
+        b.iter(|| test::black_box(&g).has_cycles());
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_has_cycles_cyclic_100(b: &mut test::Bencher) {
+        let g = make_cyclic_graph(100);
+        b.iter(|| test::black_box(&g).has_cycles());
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_compute_hash_100(b: &mut test::Bencher) {
+        let g = make_chain_graph(100);
+        b.iter(|| test::black_box(&g).compute_hash());
+    }
 }

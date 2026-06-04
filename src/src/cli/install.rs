@@ -838,4 +838,43 @@ version = "0.1.0"
         assert!(nm.join("café-🔥").exists());
         assert!(nm.join("café-🔥/index.js").exists());
     }
+
+    fn make_tarball(n: usize) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+        for i in 0..n {
+            let name = format!("files/file_{i:06}.js");
+            let content = format!("module.exports = {{ id: {i} }};\n");
+            let mut header = tar::Header::new_gnu();
+            header.set_path(&name).unwrap();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            ar.append(&header, content.as_bytes()).unwrap();
+        }
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+        buf
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_extract_tarball_100(b: &mut test::Bencher) {
+        let tarball = make_tarball(100);
+        b.iter(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            extract_tarball(test::black_box(&tarball), test::black_box(tmp.path()))
+        });
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_extract_tarball_1000(b: &mut test::Bencher) {
+        let tarball = make_tarball(1000);
+        b.iter(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            extract_tarball(test::black_box(&tarball), test::black_box(tmp.path()))
+        });
+    }
 }

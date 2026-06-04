@@ -365,4 +365,31 @@ mod tests {
             "small.js"
         );
     }
+
+    fn create_bench_scan_dir(n: usize) -> tempfile::TempDir {
+        let dir = create_temp_dir();
+        for i in 0..n {
+            let name = format!("src/file_{i:06}.js");
+            write_file(dir.path(), &name, &format!("const x = {i};\n"));
+        }
+        // Add some ignored dirs with files that should be skipped
+        write_file(dir.path(), "node_modules/evil.js", "bad");
+        write_file(dir.path(), ".git/config.js", "skip");
+        write_file(dir.path(), "dist/bundle.js", "nope");
+        dir
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_scan_100(b: &mut test::Bencher) {
+        let dir = create_bench_scan_dir(100);
+        b.iter(|| scan_package(test::black_box(dir.path())).unwrap());
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_scan_1000(b: &mut test::Bencher) {
+        let dir = create_bench_scan_dir(1000);
+        b.iter(|| scan_package(test::black_box(dir.path())).unwrap());
+    }
 }

@@ -1,3 +1,8 @@
+#![cfg_attr(all(test, feature = "nightly-bench"), feature(test))]
+#![cfg_attr(all(test, feature = "nightly-bench"), allow(unused_extern_crates))]
+#[cfg(all(test, feature = "nightly-bench"))]
+extern crate test;
+
 mod analysis;
 mod cli;
 mod lockfile;

@@ -21,6 +21,9 @@ libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 
+[features]
+nightly-bench = []
+
 [dev-dependencies]
 mockito = "1"
 

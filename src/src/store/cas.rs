@@ -228,4 +228,23 @@ mod tests {
         assert!(data.is_some());
         assert_eq!(data.unwrap(), b"");
     }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_store_put_1kb(b: &mut test::Bencher) {
+        let (_dir, store) = setup();
+        let data = vec![0u8; 1024];
+        b.iter(|| store.put(test::black_box(&data)).unwrap());
+    }
+
+    #[cfg(feature = "nightly-bench")]
+    #[bench]
+    fn bench_store_put_graph_100(b: &mut test::Bencher) {
+        let (_dir, store) = setup();
+        let nodes: Vec<crate::types::Version> = (0..100)
+            .map(|i| crate::types::Version::parse(&format!("{i}.0.0")).unwrap())
+            .collect();
+        let bytes = serde_json::to_vec(&nodes).unwrap();
+        b.iter(|| store.put_graph(test::black_box(&bytes)).unwrap());
+    }
 }
