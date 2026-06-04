@@ -2,8 +2,10 @@
 //! Supports three profiles: Hermetic (minimal syscalls), Restricted (safe syscalls),
 //! and Open (no restrictions).
 
-use std::os::unix::process::CommandExt;
 use std::process::Command;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::sandbox::profiles::{Profile, SandboxConfig};
 
@@ -29,7 +31,7 @@ impl Executor {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
 
-        // Install seccomp filter in the child process before exec
+        #[cfg(target_os = "linux")]
         unsafe {
             cmd.pre_exec(move || apply_seccomp(profile));
         }
@@ -344,6 +346,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_build_filter_hermetic() {
         let filters = build_seccomp_filter(HERMETIC_SYSCALLS);
