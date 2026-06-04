@@ -217,7 +217,6 @@ fn expand_workspace_members(
                 repo: None,
                 url: None,
                 commit: None,
-                package: None,
             });
         }
     }
@@ -234,19 +233,11 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     {
         let mut entry = entry.context("failed to read tarball entry")?;
         let path = entry.path().context("failed to read entry path")?;
-        let components: Vec<_> = path.components().collect();
-        let stripped = if components
-            .first()
-            .is_some_and(|c| c.as_os_str() == "package")
-        {
-            components.iter().skip(1).collect::<PathBuf>()
-        } else {
-            path.to_path_buf()
-        };
+        let stripped = path.strip_prefix("package").unwrap_or(&path);
         if stripped.as_os_str().is_empty() {
             continue;
         }
-        let target = dest.join(&stripped);
+        let target = dest.join(stripped);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -435,7 +426,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                         true,
                         Some(SecurityMeta {
                             risk_level: Some(result.risk_level.to_string()),
-                            analysis_version: Some("1.0.0".to_string()),
                         }),
                     )
                 } else if non_interactive {
@@ -456,7 +446,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                         true,
                         Some(SecurityMeta {
                             risk_level: Some(rl.to_string()),
-                            analysis_version: Some("1.0.0".to_string()),
                         }),
                     )
                 } else {
@@ -467,7 +456,6 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                                 true,
                                 Some(SecurityMeta {
                                     risk_level: Some(result.risk_level.to_string()),
-                                    analysis_version: Some("1.0.0".to_string()),
                                 }),
                             )
                         }
@@ -630,7 +618,6 @@ mod tests {
                 url: None,
                 commit: None,
                 path: None,
-                package: None,
             },
             crate::manifest::types::DependencyEntry {
                 name: "react".into(),
@@ -640,7 +627,6 @@ mod tests {
                 url: None,
                 commit: None,
                 path: None,
-                package: None,
             },
         ];
         assert!(find_dep(&deps, "zod").is_some());
@@ -839,6 +825,7 @@ version = "0.1.0"
         assert!(nm.join("café-🔥/index.js").exists());
     }
 
+    #[allow(dead_code)]
     fn make_tarball(n: usize) -> Vec<u8> {
         let mut buf = Vec::new();
         let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());

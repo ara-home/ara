@@ -29,6 +29,7 @@ struct ManifestRaw {
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ProjectRaw {
     name: Option<String>,
     version: Option<String>,
@@ -47,8 +48,6 @@ struct WorkspaceRaw {
 struct SecurityRaw {
     risk_threshold: Option<String>,
     require_review: Option<bool>,
-    allow_lifecycle_scripts: Option<bool>,
-    block_critical: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -73,10 +72,6 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
             Project {
                 name,
                 version,
-                description: p.description,
-                license: p.license,
-                repository: p.repository,
-                homepage: p.homepage,
             }
         }
         None => return Err(ManifestParseError::MissingProjectName),
@@ -100,7 +95,6 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                     url: raw.url,
                     commit: raw.commit,
                     path: raw.path,
-                    package: raw.package,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -120,8 +114,6 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
             Ok(Security {
                 risk_threshold: s.risk_threshold,
                 require_review: s.require_review,
-                allow_lifecycle_scripts: s.allow_lifecycle_scripts,
-                block_critical: s.block_critical,
             })
         })
         .transpose()?;

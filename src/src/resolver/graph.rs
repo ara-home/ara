@@ -212,6 +212,7 @@ mod tests {
         assert!(hash.iter().any(|&b| b != 0));
     }
 
+    #[allow(dead_code)]
     fn make_chain_graph(n: usize) -> Graph {
         let mut g = Graph::new();
         for i in 0..n {
@@ -232,6 +233,7 @@ mod tests {
         g
     }
 
+    #[allow(dead_code)]
     fn make_cyclic_graph(n: usize) -> Graph {
         let mut g = Graph::new();
         for i in 0..n {

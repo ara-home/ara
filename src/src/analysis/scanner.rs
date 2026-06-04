@@ -366,6 +366,7 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)]
     fn create_bench_scan_dir(n: usize) -> tempfile::TempDir {
         let dir = create_temp_dir();
         for i in 0..n {

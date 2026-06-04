@@ -30,19 +30,15 @@ impl FromStr for Profile {
 
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemAccess {
-    pub allowed_paths: Vec<String>,
-    pub writable_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkAccess {
     pub enabled: bool,
-    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct EnvironmentAccess {
-    pub allowed_vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,20 +82,12 @@ impl SandboxConfig {
                 profile,
                 network: NetworkAccess {
                     enabled: true,
-                    ..Default::default()
                 },
                 process: ProcessAccess { allow_spawn: true },
-                environment: EnvironmentAccess {
-                    allowed_vars: vec!["*".to_string()],
-                },
                 ..Default::default()
             },
             Profile::Restricted => Self {
                 profile,
-                filesystem: FilesystemAccess {
-                    allowed_paths: vec!["./".to_string()],
-                    ..Default::default()
-                },
                 ..Default::default()
             },
             Profile::Hermetic => Self {

@@ -6,10 +6,6 @@ use serde::Deserialize;
 pub struct Project {
     pub name: String,
     pub version: String,
-    pub description: Option<String>,
-    pub license: Option<String>,
-    pub repository: Option<String>,
-    pub homepage: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -20,8 +16,6 @@ pub struct DepEntryRaw {
     pub url: Option<String>,
     pub commit: Option<String>,
     pub path: Option<String>,
-    #[serde(rename = "package")]
-    pub package: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +27,6 @@ pub struct DependencyEntry {
     pub url: Option<String>,
     pub commit: Option<String>,
     pub path: Option<String>,
-    pub package: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,8 +44,6 @@ pub struct ScriptEntry {
 pub struct Security {
     pub risk_threshold: Option<String>,
     pub require_review: Option<bool>,
-    pub allow_lifecycle_scripts: Option<bool>,
-    pub block_critical: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,10 +72,6 @@ mod tests {
         let p = Project {
             name: "test".into(),
             version: "0.1.0".into(),
-            description: Some("desc".into()),
-            license: None,
-            repository: None,
-            homepage: None,
         };
         assert_eq!(p.name, "test");
         assert_eq!(p.version, "0.1.0");
@@ -100,7 +87,6 @@ mod tests {
             url: None,
             commit: None,
             path: None,
-            package: None,
         };
         assert_eq!(d.name, "zod");
         assert_eq!(d.version.as_deref(), Some("^3.0.0"));
@@ -112,10 +98,6 @@ mod tests {
             project: Project {
                 name: "app".into(),
                 version: "1.0.0".into(),
-                description: None,
-                license: None,
-                repository: None,
-                homepage: None,
             },
             deps: vec![DependencyEntry {
                 name: "react".into(),
@@ -125,7 +107,6 @@ mod tests {
                 url: None,
                 commit: None,
                 path: None,
-                package: None,
             }],
             workspace: Some(Workspace {
                 members: vec!["apps/*".into()],
@@ -137,8 +118,6 @@ mod tests {
             security: Some(Security {
                 risk_threshold: Some("high".into()),
                 require_review: Some(true),
-                allow_lifecycle_scripts: None,
-                block_critical: None,
             }),
             build: Some(Build {
                 hermetic: Some(true),

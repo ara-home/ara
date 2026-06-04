@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
@@ -13,15 +14,15 @@ use crate::types::{AnalysisResult, Finding, RiskLevel};
 use super::patterns::{all_patterns, install_scripts_pattern, Pattern};
 use super::scanner::scan_package;
 
-fn compile_patterns<'p>(patterns: &[&'p Pattern]) -> Vec<(&'p Pattern, Regex)> {
-    patterns
+static COMPILED: LazyLock<Vec<(&'static Pattern, Regex)>> = LazyLock::new(|| {
+    all_patterns()
         .iter()
         .filter_map(|p| {
             if p.regex.is_empty() {
                 return None;
             }
             match Regex::new(p.regex) {
-                Ok(re) => Some((*p, re)),
+                Ok(re) => Some((p, re)),
                 Err(e) => {
                     eprintln!("warning: failed to compile regex for `{}`: {e}", p.id);
                     None
@@ -29,7 +30,7 @@ fn compile_patterns<'p>(patterns: &[&'p Pattern]) -> Vec<(&'p Pattern, Regex)> {
             }
         })
         .collect()
-}
+});
 
 fn glob_matches(glob: &str, filename: &str) -> bool {
     if glob == filename {
@@ -89,14 +90,13 @@ fn find_line_number(content: &str, byte_offset: usize) -> usize {
 pub fn analyze_package(package_path: &Path) -> Result<AnalysisResult> {
     let files = scan_package(package_path)?;
 
-    let patterns: Vec<&Pattern> = all_patterns().iter().collect();
-    let compiled = compile_patterns(&patterns);
+    let compiled = &*COMPILED;
     let install_script_pat = install_scripts_pattern();
 
     let mut findings: Vec<Finding> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: HashSet<(usize, &str, usize)> = HashSet::new();
 
-    for file in &files {
+    for (file_idx, file) in files.iter().enumerate() {
         let filename = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if filename == "package.json" {
@@ -105,17 +105,16 @@ pub fn analyze_package(package_path: &Path) -> Result<AnalysisResult> {
         }
 
         // run code patterns using regex find_iter for precise locations
-        for (pattern, re) in &compiled {
+        for (pattern, re) in compiled {
             if !glob_matches(pattern.file_glob, filename) {
                 continue;
             }
 
             for m in re.find_iter(&file.content) {
-                let line_num = find_line_number(&file.content, m.start());
-                let location = format!("{}:{}", file.path.display(), line_num);
-                let dedup_key = (pattern.id.to_string(), location.clone());
-
+                let dedup_key = (file_idx, pattern.id, m.start());
                 if seen.insert(dedup_key) {
+                    let line_num = find_line_number(&file.content, m.start());
+                    let location = format!("{}:{}", file.path.display(), line_num);
                     findings.push(make_finding(pattern, location));
                 }
             }
@@ -277,6 +276,7 @@ mod tests {
         assert!(result.findings.iter().any(|f| f.pattern == "eval-usage"));
     }
 
+    #[allow(dead_code)]
     fn create_bench_analysis_dir(n: usize) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..n {

@@ -1,8 +1,6 @@
 //! Content-addressable store for caching package tarballs and dependency graphs.
 //! Objects are stored as `sha256-<hex>` under `objects/`, and graphs under `graphs/`.
 
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use crate::util::hash;

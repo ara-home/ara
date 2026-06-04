@@ -17,13 +17,11 @@ fn default_resolver() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SecurityMeta {
     pub risk_level: Option<String>,
-    pub analysis_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SbomMeta {
     pub license: Option<String>,
-    pub supplier: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
