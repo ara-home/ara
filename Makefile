@@ -32,7 +32,7 @@ lint-pedantic:
 audit:
 	@echo "  AUDIT  ara"
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "  SKIP   cargo-audit not installed (install with: cargo install cargo-audit)"; exit 0; }
-	@cd src && cargo audit 2>&1
+	@cargo audit 2>&1
 
 deny:
 	@echo "  DENY   ara"

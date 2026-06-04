@@ -1,15 +1,13 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
-notice = "warn"
+unmaintained = "workspace"
+unsound = "all"
 ignore = []
 
 [licenses]
 unlicensed = "deny"
-allow-osi-freel = false
+allow-osi-fsf-free = "neither"
 default = "deny"
-confidence = 0.8
+confidence-threshold = 0.8
 allow = [
     "MIT",
     "Apache-2.0",

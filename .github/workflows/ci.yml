@@ -24,10 +24,14 @@ jobs:
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2.9.1
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46 # v2.81.2
+        with:
+          tool: cargo-audit
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46 # v2.81.2
+        with:
+          tool: cargo-deny
 
       - name: Test
         working-directory: src
@@ -61,7 +65,9 @@ jobs:
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2.9.1
 
       - name: Install cargo-udeps
-        run: cargo install cargo-udeps --locked
+        uses: taiki-e/install-action@cde8c9e634f4a17bc06b61413ac0ef75450eac46 # v2.81.2
+        with:
+          tool: cargo-udeps
 
       - name: UDeps
         working-directory: src
