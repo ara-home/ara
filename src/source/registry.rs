@@ -22,6 +22,15 @@ impl RegistrySource {
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
 
+        // Prefer the `latest` dist-tag when present (matches npm behavior)
+        if let Some(latest_tag) = parsed
+            .get("dist-tags")
+            .and_then(|t| t.get("latest"))
+            .and_then(|v| v.as_str())
+        {
+            return Ok(latest_tag.to_string());
+        }
+
         let versions = parsed
             .get("versions")
             .and_then(|v| v.as_object())
@@ -51,10 +60,7 @@ impl RegistrySource {
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
-        let ver_str = format!(
-            "{}.{}.{}",
-            identity.version.major, identity.version.minor, identity.version.patch
-        );
+        let ver_str = identity.version.to_string();
         let tarball_url = format!(
             "{}/{name}/-/{name}-{ver_str}.tgz",
             self.registry_url,
@@ -138,6 +144,76 @@ mod tests {
         let src = RegistrySource::new(format!("{url}"));
         let err = src.resolve("empty").unwrap_err();
         assert!(matches!(err, SourceError::VersionNotFound));
+    }
+
+    #[test]
+    fn test_resolve_prefers_dist_tags_latest() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        // dist-tags.latest points to 2.0.0 even though 3.0.0-canary exists
+        let body = serde_json::json!({
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "2.0.0": {},
+                "3.0.0-canary.1": {}
+            }
+        });
+
+        let _mock = server
+            .mock("GET", "/pkg")
+            .with_status(200)
+            .with_body(body.to_string())
+            .create();
+
+        let src = RegistrySource::new(format!("{url}"));
+        let version = src.resolve("pkg").unwrap();
+        assert_eq!(version, "2.0.0");
+    }
+
+    #[test]
+    fn test_resolve_fallback_highest_semver_no_dist_tags() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let body = serde_json::json!({
+            "versions": {
+                "1.0.0": {},
+                "3.0.0": {},
+                "2.0.0": {}
+            }
+        });
+
+        let _mock = server
+            .mock("GET", "/naked")
+            .with_status(200)
+            .with_body(body.to_string())
+            .create();
+
+        let src = RegistrySource::new(format!("{url}"));
+        let version = src.resolve("naked").unwrap();
+        assert_eq!(version, "3.0.0");
+    }
+
+    #[test]
+    fn test_fetch_tarball_with_prerelease() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let _mock = server
+            .mock("GET", "/next/-/next-16.3.0-canary.41.tgz")
+            .with_status(200)
+            .with_body(b"fake-next-tarball")
+            .create();
+
+        let src = RegistrySource::new(format!("{url}"));
+        let identity = crate::types::PackageIdentity {
+            source: crate::types::SourceType::Npm,
+            name: "next".to_string(),
+            version: crate::types::Version::parse("16.3.0-canary.41").unwrap(),
+            content_hash: None,
+            requested_ref: None,
+        };
+        let result = src.fetch(&identity).unwrap();
+        assert_eq!(result, b"fake-next-tarball");
     }
 
     #[test]
