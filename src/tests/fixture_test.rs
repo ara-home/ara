@@ -163,6 +163,25 @@ fn find_npm_deps(fixture_dir: &Path) -> Vec<(String, String)> {
         }
     }
 
+    // Try .npm-deps file (used by URL install fixture scenarios)
+    let npm_deps_file = fixture_dir.join(".npm-deps");
+    if npm_deps_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&npm_deps_file) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+                let pkg_name = parts[0].trim();
+                let pkg_ver = parts.get(1).unwrap_or(&"*").trim();
+                if !pkg_name.is_empty() {
+                    deps.push((pkg_name.to_string(), pkg_ver.to_string()));
+                }
+            }
+        }
+    }
+
     deps.sort();
     deps.dedup_by(|a, b| a.0 == b.0);
     deps
@@ -234,6 +253,7 @@ fn run_fixture_with_command(
     let (should_succeed, check_lockfile) = match category {
         "valid" | "edge" | "workspace" => (true, true),
         "malformed" => (false, false),
+        "" => (true, true), // URL install fixtures
         _ => (true, false),
     };
 
@@ -360,6 +380,70 @@ fn test_fixtures_security() {
 fn test_fixtures_workspace() {
     let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     run_test_category(&fixtures_root, "workspace", run_fixture);
+}
+
+// ---------------------------------------------------------------------------
+// URL install fixtures — each scenario defines its own args
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_install_url_by_name() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let result = run_fixture_with_command(
+        &r,
+        "",
+        "13-install-by-name",
+        &["install", "--non-interactive", "zod"],
+    );
+    assert!(result.passed, "{}", result.detail);
+}
+
+#[test]
+fn test_install_url_by_name_with_version() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let result = run_fixture_with_command(
+        &r,
+        "",
+        "14-install-by-name-with-version",
+        &["install", "--non-interactive", "zod@3.22.0"],
+    );
+    assert!(result.passed, "{}", result.detail);
+}
+
+#[test]
+fn test_install_url_with_save_dev() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let result = run_fixture_with_command(
+        &r,
+        "",
+        "15-install-with-save-dev",
+        &["install", "--non-interactive", "--save-dev", "eslint"],
+    );
+    assert!(result.passed, "{}", result.detail);
+}
+
+#[test]
+fn test_install_url_multiple() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let result = run_fixture_with_command(
+        &r,
+        "",
+        "16-install-multiple",
+        &["install", "--non-interactive", "react", "zod", "typescript"],
+    );
+    assert!(result.passed, "{}", result.detail);
+}
+
+#[test]
+fn test_install_url_into_existing_manifest() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let result = run_fixture_with_command(
+        &r,
+        "",
+        "17-install-into-existing-manifest",
+        &["install", "--non-interactive", "express"],
+    );
+    assert!(result.passed, "{}", result.detail);
 }
 
 fn print_summary(results: &[FixtureResult]) {
