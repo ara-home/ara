@@ -223,6 +223,9 @@ pub(crate) fn cmd_install_specs(
     save_peer: bool,
     save_optional: bool,
     range: Option<&str>,
+    force: bool,
+    refresh: bool,
+    offline: bool,
     non_interactive: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
@@ -309,11 +312,19 @@ pub(crate) fn cmd_install_specs(
         );
 
         let cache_key = format!("{}@{}", resolved.name, ver_str);
-        let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
+        let (pkg_content, hash_str) = if force {
+            // --force: always re-download
+            fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
+        } else if let Some(cached_hash) = store_index.get(&cache_key) {
             if store.contains(cached_hash) {
                 if let Some(content) = store.get(cached_hash)? {
-                    println!("  using cached {}@{}", resolved.name, ver_str);
-                    (content, cached_hash.clone())
+                    if refresh {
+                        println!("  refresh: re-fetching {}@{}", resolved.name, ver_str);
+                        fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
+                    } else {
+                        println!("  using cached {}@{}", resolved.name, ver_str);
+                        (content, cached_hash.clone())
+                    }
                 } else {
                     store_index.remove(&cache_key);
                     fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
@@ -322,6 +333,12 @@ pub(crate) fn cmd_install_specs(
                 store_index.remove(&cache_key);
                 fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
             }
+        } else if offline {
+            anyhow::bail!(
+                "{}@{} not found in cache (--offline mode)",
+                resolved.name,
+                ver_str
+            );
         } else {
             fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
         };

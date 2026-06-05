@@ -32,6 +32,15 @@ pub enum Commands {
         /// Version range strategy: "exact" (default), "caret" (^), or "patch" (~)
         #[arg(long)]
         range: Option<String>,
+        /// Force re-download even if cached
+        #[arg(long)]
+        force: bool,
+        /// Bypass cache for mutable references (branches, tags)
+        #[arg(long)]
+        refresh: bool,
+        /// Fail if package is not in cache
+        #[arg(long)]
+        offline: bool,
         #[arg(long)]
         non_interactive: bool,
     },
@@ -70,6 +79,9 @@ impl Cli {
                 save_peer,
                 save_optional,
                 range,
+                force,
+                refresh,
+                offline,
                 non_interactive,
             } => {
                 if !deps.is_empty() {
@@ -79,6 +91,9 @@ impl Cli {
                         *save_peer,
                         *save_optional,
                         range.as_deref(),
+                        *force,
+                        *refresh,
+                        *offline,
                         *non_interactive,
                     )
                 } else {
