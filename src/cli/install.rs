@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use rayon::prelude::*;
 
 use anyhow::{Context, Result};
 
@@ -328,7 +331,7 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
-    store_index: &mut HashMap<String, String>,
+    store_index: &Arc<Mutex<HashMap<String, String>>>,
     pkg_entries: &mut Vec<PackageEntry>,
 ) -> Result<()> {
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
@@ -337,6 +340,8 @@ fn install_transitive_deps(
     let mut installed_any = true;
     while installed_any {
         installed_any = false;
+
+        let mut transitive_needs: Vec<(String, String)> = Vec::new();
 
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(node_modules) {
@@ -355,7 +360,6 @@ fn install_transitive_deps(
                 if fname == ".bin" {
                     continue;
                 }
-                // Scoped package directory — add its subdirectories
                 if fname.starts_with('@') {
                     if let Ok(sub_entries) = std::fs::read_dir(&path) {
                         for sub in sub_entries.flatten() {
@@ -376,29 +380,45 @@ fn install_transitive_deps(
             if !pkg_json.exists() {
                 continue;
             }
-            let content = std::fs::read_to_string(&pkg_json)?;
-            let pkg: serde_json::Value = serde_json::from_str(&content)?;
+            let content = match std::fs::read_to_string(&pkg_json) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let pkg: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
-            // Collect from `dependencies`, `peerDependencies`, and `optionalDependencies`
             let dep_sources = ["dependencies", "peerDependencies", "optionalDependencies"];
-            let mut deps: Vec<(String, String)> = Vec::new();
             for key in &dep_sources {
                 if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
                     for (name, ver) in map {
                         if let Some(ver_str) = ver.as_str() {
-                            deps.push((name.clone(), ver_str.to_string()));
+                            let dep_dir = node_modules.join(name);
+                            if !dep_dir.exists() {
+                                transitive_needs.push((name.clone(), ver_str.to_string()));
+                            }
                         }
                     }
                 }
             }
+        }
 
-            for (dep_name, dep_ver_str) in &deps {
+        if transitive_needs.is_empty() {
+            break;
+        }
+
+        // Remove duplicates while preserving order
+        let mut seen = HashSet::new();
+        transitive_needs.retain(|(name, _)| seen.insert(name.clone()));
+
+        let results: Vec<_> = transitive_needs
+            .par_iter()
+            .filter_map(|(dep_name, dep_ver_str)| {
                 let dep_dir = node_modules.join(dep_name);
                 if dep_dir.exists() {
-                    continue;
+                    return None;
                 }
-
-                println!("  installing transitive dep: {}@{}", dep_name, dep_ver_str);
 
                 let reg = crate::source::registry::RegistrySource::new(registry_url.clone());
                 let resolved_ver = match reg.resolve_matching(dep_name, dep_ver_str) {
@@ -406,14 +426,14 @@ fn install_transitive_deps(
                     Err(_) => match reg.resolve(dep_name) {
                         Ok(v) => v,
                         Err(e) => {
-                            println!("    warning: cannot resolve {}: {}", dep_name, e);
-                            continue;
+                            eprintln!("    warning: cannot resolve {}: {}", dep_name, e);
+                            return None;
                         }
                     },
                 };
                 let parsed_ver = match Version::parse(&resolved_ver) {
                     Ok(v) => v,
-                    Err(_) => continue,
+                    Err(_) => return None,
                 };
 
                 let identity = PackageIdentity {
@@ -430,63 +450,100 @@ fn install_transitive_deps(
                 );
                 let cache_key = format!("npm:{}@{}", dep_name, short_ver);
 
-                let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key)
-                {
-                    if store.contains(cached_hash) {
-                        if let Some(content) = store.get(cached_hash)? {
-                            println!("    using cached {}@{}", dep_name, short_ver);
-                            (content, cached_hash.clone())
-                        } else {
-                            store_index.remove(&cache_key);
-                            let content = reg.fetch(&identity)?;
-                            let hash = store.put(&content)?;
-                            store_index.insert(cache_key, hash.clone());
-                            (content, hash)
-                        }
-                    } else {
-                        store_index.remove(&cache_key);
-                        let content = reg.fetch(&identity)?;
-                        let hash = store.put(&content)?;
-                        store_index.insert(cache_key, hash.clone());
-                        (content, hash)
-                    }
-                } else {
-                    let content = reg.fetch(&identity)?;
-                    let hash = store.put(&content)?;
-                    store_index.insert(cache_key, hash.clone());
-                    (content, hash)
+                let cache_lookup = {
+                    let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.get(&cache_key).cloned()
                 };
 
-                std::fs::create_dir_all(&dep_dir)?;
+                let (pkg_content, hash_str) = if let Some(cached_hash) = cache_lookup {
+                    if store.contains(&cached_hash) {
+                        match store.get(&cached_hash) {
+                            Ok(Some(content)) => {
+                                println!("    using cached {}@{}", dep_name, short_ver);
+                                (content, cached_hash)
+                            }
+                            _ => {
+                                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                                idx.remove(&cache_key);
+                                match reg.fetch(&identity) {
+                                    Ok(content) => {
+                                        let hash = store.put(&content).ok()?;
+                                        idx.insert(cache_key, hash.clone());
+                                        (content, hash)
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "    warning: failed to fetch {}: {}",
+                                            dep_name, e
+                                        );
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.remove(&cache_key);
+                        match reg.fetch(&identity) {
+                            Ok(content) => {
+                                let hash = store.put(&content).ok()?;
+                                idx.insert(cache_key, hash.clone());
+                                (content, hash)
+                            }
+                            Err(e) => {
+                                eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                                return None;
+                            }
+                        }
+                    }
+                } else {
+                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    match reg.fetch(&identity) {
+                        Ok(content) => {
+                            let hash = store.put(&content).ok()?;
+                            idx.insert(cache_key, hash.clone());
+                            (content, hash)
+                        }
+                        Err(e) => {
+                            eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                            return None;
+                        }
+                    }
+                };
+
+                std::fs::create_dir_all(&dep_dir).ok()?;
                 if let Err(e) = extract_tarball(&pkg_content, &dep_dir) {
-                    println!("    failed to extract {}: {}", dep_name, e);
+                    eprintln!("    failed to extract {}: {}", dep_name, e);
                     let _ = std::fs::remove_dir_all(&dep_dir);
-                    continue;
+                    return None;
                 }
 
                 if let Err(e) = install_bin_links(node_modules, dep_name, &dep_dir) {
-                    println!(
+                    eprintln!(
                         "    warning: failed to create bin links for {}: {}",
                         dep_name, e
                     );
                 }
 
-                pkg_entries.push(PackageEntry {
-                    name: dep_name.clone(),
-                    version: short_ver,
-                    source: "npm".to_string(),
-                    package_hash: hash_str,
-                    integrity: None,
-                    signature: None,
-                    repository: None,
-                    commit: None,
-                    dependencies: None,
-                    security: None,
-                    sbom: None,
-                });
+                Some((dep_name.clone(), short_ver, hash_str))
+            })
+            .collect();
 
-                installed_any = true;
-            }
+        for (dep_name, short_ver, hash_str) in &results {
+            pkg_entries.push(PackageEntry {
+                name: dep_name.clone(),
+                version: short_ver.clone(),
+                source: "npm".to_string(),
+                package_hash: hash_str.clone(),
+                integrity: None,
+                signature: None,
+                repository: None,
+                commit: None,
+                dependencies: None,
+                security: None,
+                sbom: None,
+            });
+            installed_any = true;
         }
     }
 
@@ -565,12 +622,13 @@ pub(crate) fn cmd_install_specs(
     }
 
     let index_path = store_base.join("index.json");
-    let mut store_index: HashMap<String, String> = if index_path.exists() {
+    let store_index: HashMap<String, String> = if index_path.exists() {
         let idx_content = std::fs::read_to_string(&index_path)?;
         serde_json::from_str(&idx_content).unwrap_or_default()
     } else {
         HashMap::new()
     };
+    let store_index = Arc::new(Mutex::new(store_index));
 
     // Seed pkg_entries from existing lockfile so we don't lose prior entries
     let lock_path = cwd.join("ara.lock");
@@ -615,48 +673,81 @@ pub(crate) fn cmd_install_specs(
         let (pkg_content, hash_str) = if force {
             let content = fetch_meta_content(&meta)?;
             let hash = store.put(&content)?;
-            store_index.insert(cache_key.clone(), hash.clone());
+            {
+                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.insert(cache_key.clone(), hash.clone());
+            }
             println!("  fetching {}@{} (forced)...", meta.name, ver_str);
             (content, hash)
-        } else if let Some(cached_hash) = store_index.get(&cache_key) {
-            if store.contains(cached_hash) {
-                if let Some(content) = store.get(cached_hash)? {
-                    if refresh {
-                        println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
+        } else {
+            let cached = {
+                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.get(&cache_key).cloned()
+            };
+            if let Some(cached_hash) = cached {
+                if store.contains(&cached_hash) {
+                    if let Some(content) = store.get(&cached_hash)? {
+                        if refresh {
+                            println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
+                            let content = fetch_meta_content(&meta)?;
+                            let hash = store.put(&content)?;
+                            {
+                                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                                idx.insert(cache_key.clone(), hash.clone());
+                            }
+                            (content, hash)
+                        } else {
+                            println!("  using cached {}@{}", meta.name, ver_str);
+                            (content, cached_hash)
+                        }
+                    } else {
+                        {
+                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                            idx.remove(&cache_key);
+                        }
                         let content = fetch_meta_content(&meta)?;
                         let hash = store.put(&content)?;
-                        store_index.insert(cache_key, hash.clone());
+                        {
+                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                            idx.insert(cache_key.clone(), hash.clone());
+                        }
                         (content, hash)
-                    } else {
-                        println!("  using cached {}@{}", meta.name, ver_str);
-                        (content, cached_hash.clone())
                     }
+                } else if offline {
+                    anyhow::bail!(
+                        "{}@{} not found in cache (--offline mode)",
+                        meta.name,
+                        ver_str
+                    );
                 } else {
-                    store_index.remove(&cache_key);
+                    {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.remove(&cache_key);
+                    }
                     let content = fetch_meta_content(&meta)?;
                     let hash = store.put(&content)?;
-                    store_index.insert(cache_key, hash.clone());
+                    {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.insert(cache_key.clone(), hash.clone());
+                    }
                     (content, hash)
                 }
+            } else if offline {
+                anyhow::bail!(
+                    "{}@{} not found in cache (--offline mode)",
+                    meta.name,
+                    ver_str
+                );
             } else {
-                store_index.remove(&cache_key);
                 let content = fetch_meta_content(&meta)?;
                 let hash = store.put(&content)?;
-                store_index.insert(cache_key, hash.clone());
+                {
+                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.insert(cache_key.clone(), hash.clone());
+                }
+                println!("  fetching {}@{}...", meta.name, ver_str);
                 (content, hash)
             }
-        } else if offline {
-            anyhow::bail!(
-                "{}@{} not found in cache (--offline mode)",
-                meta.name,
-                ver_str
-            );
-        } else {
-            let content = fetch_meta_content(&meta)?;
-            let hash = store.put(&content)?;
-            store_index.insert(cache_key, hash.clone());
-            println!("  fetching {}@{}...", meta.name, ver_str);
-            (content, hash)
         };
 
         // For tarball URLs, identity is embedded in the tarball — extract it now
@@ -779,7 +870,12 @@ pub(crate) fn cmd_install_specs(
     }
 
     // Save store index
-    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
 
     // Write updated ara.toml
     let ara_toml_content = generate_ara_toml(&m);
@@ -792,7 +888,7 @@ pub(crate) fn cmd_install_specs(
     }
 
     // Install transitive dependencies discovered from the newly installed packages
-    install_transitive_deps(&node_modules, &store, &mut store_index, &mut pkg_entries)?;
+    install_transitive_deps(&node_modules, &store, &store_index, &mut pkg_entries)?;
 
     Ok(())
 }
@@ -1222,7 +1318,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     store.ensure_dirs()?;
 
     let index_path = store_base.join("index.json");
-    let mut store_index: HashMap<String, String> = if index_path.exists() {
+    let store_index: HashMap<String, String> = if index_path.exists() {
         let idx_content = std::fs::read_to_string(&index_path)?;
         serde_json::from_str(&idx_content).unwrap_or_default()
     } else {
@@ -1235,68 +1331,112 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         }
     }
 
+    let store_index = Arc::new(Mutex::new(store_index));
     let mut pkg_entries: Vec<PackageEntry> = Vec::new();
 
-    for node in &graph.nodes {
-        let ver_str = format!(
-            "{}.{}.{}",
-            node.version.major, node.version.minor, node.version.patch
-        );
+    // Process packages in parallel
+    struct ProcessedNode {
+        name: String,
+        version: String,
+        hash_str: String,
+        pkg_dir: PathBuf,
+        source_type: String,
+        analysis: Result<crate::types::AnalysisResult>,
+    }
 
-        let Some(dep) = find_dep(&m.deps, &node.name) else {
-            println!("  skipped {}: no dependency config", node.name);
-            continue;
-        };
+    let processed: Vec<ProcessedNode> = graph
+        .nodes
+        .par_iter()
+        .filter_map(|node| {
+            let ver_str = format!(
+                "{}.{}.{}",
+                node.version.major, node.version.minor, node.version.patch
+            );
 
-        let src = match create_source(node.source, dep) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("  skipped {}: failed to create source ({})", node.name, e);
-                continue;
-            }
-        };
+            let dep = find_dep(&m.deps, &node.name)?;
 
-        let cache_key = format!("{}@{}", node.name, ver_str);
+            let src = create_source(node.source, dep).ok()?;
 
-        let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
-            if store.contains(cached_hash) {
-                if let Some(content) = store.get(cached_hash)? {
-                    println!("  using cached {}@{}", node.name, ver_str);
-                    (content, cached_hash.clone())
+            let cache_key = format!("{}@{}", node.name, ver_str);
+
+            let cached = {
+                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.get(&cache_key).cloned()
+            };
+
+            let (pkg_content, hash_str) = if let Some(cached_hash) = cached {
+                if store.contains(&cached_hash) {
+                    match store.get(&cached_hash) {
+                        Ok(Some(content)) => {
+                            println!("  using cached {}@{}", node.name, ver_str);
+                            (content, cached_hash)
+                        }
+                        _ => {
+                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                            idx.remove(&cache_key);
+                            drop(idx);
+                            fetch_and_store_parallel(
+                                &store,
+                                &store_index,
+                                &src,
+                                &cache_key,
+                                node,
+                                &ver_str,
+                            )?
+                        }
+                    }
                 } else {
-                    store_index.remove(&cache_key);
-                    fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
+                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.remove(&cache_key);
+                    drop(idx);
+                    fetch_and_store_parallel(
+                        &store,
+                        &store_index,
+                        &src,
+                        &cache_key,
+                        node,
+                        &ver_str,
+                    )?
                 }
             } else {
-                store_index.remove(&cache_key);
-                fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
+                fetch_and_store_parallel(&store, &store_index, &src, &cache_key, node, &ver_str)?
+            };
+
+            let pkg_dir = node_modules.join(&node.name);
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            std::fs::create_dir_all(&pkg_dir).ok()?;
+
+            if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
+                eprintln!("  failed to extract {}: {}", node.name, e);
+                return None;
             }
-        } else {
-            fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
-        };
 
-        let pkg_dir = node_modules.join(&node.name);
+            if let Err(e) = install_bin_links(&node_modules, &node.name, &pkg_dir) {
+                eprintln!(
+                    "  warning: failed to create bin links for {}: {}",
+                    node.name, e
+                );
+            }
 
-        // clean any existing directory
-        let _ = std::fs::remove_dir_all(&pkg_dir);
-        std::fs::create_dir_all(&pkg_dir)?;
+            let analysis = analyzer::analyze_package(&pkg_dir);
 
-        if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
-            println!("  failed to extract {}: {}", node.name, e);
-            continue;
-        }
+            Some(ProcessedNode {
+                name: node.name.clone(),
+                version: ver_str,
+                hash_str,
+                pkg_dir,
+                source_type: node.source.to_string(),
+                analysis,
+            })
+        })
+        .collect();
 
-        if let Err(e) = install_bin_links(&node_modules, &node.name, &pkg_dir) {
-            println!(
-                "  warning: failed to create bin links for {}: {}",
-                node.name, e
-            );
-        }
-
-        let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
+    // Handle security decisions sequentially (necessary for interactive prompts)
+    for pkg in &processed {
+        let (allowed, security) = match &pkg.analysis {
             Ok(result) => {
                 if result.findings.is_empty() {
-                    print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                    print!("  ✓ {}@{} ({})", pkg.name, pkg.version, pkg.hash_str);
                     (
                         true,
                         Some(SecurityMeta {
@@ -1309,9 +1449,9 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                     let loc = first.location.as_deref().unwrap_or("");
                     print!(
                         "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                        node.name,
-                        ver_str,
-                        hash_str,
+                        pkg.name,
+                        pkg.version,
+                        pkg.hash_str,
                         result.findings.len(),
                         rl,
                         first.description,
@@ -1324,9 +1464,12 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                         }),
                     )
                 } else {
-                    match prompt_allow_package(&node.name, &ver_str, &result.findings) {
+                    match prompt_allow_package(&pkg.name, &pkg.version, &result.findings) {
                         AllowDecision::Yes | AllowDecision::Sandbox => {
-                            println!("  ✓ {}@{} ({}) — allowed", node.name, ver_str, hash_str);
+                            println!(
+                                "  ✓ {}@{} ({}) — allowed",
+                                pkg.name, pkg.version, pkg.hash_str
+                            );
                             (
                                 true,
                                 Some(SecurityMeta {
@@ -1335,15 +1478,18 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                             )
                         }
                         AllowDecision::No => {
-                            let _ = std::fs::remove_dir_all(&pkg_dir);
-                            println!("  ✗ {}@{} ({}) — denied", node.name, ver_str, hash_str);
+                            let _ = std::fs::remove_dir_all(&pkg.pkg_dir);
+                            println!(
+                                "  ✗ {}@{} ({}) — denied",
+                                pkg.name, pkg.version, pkg.hash_str
+                            );
                             (false, None)
                         }
                     }
                 }
             }
             Err(_) => {
-                print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                print!("  ✓ {}@{} ({})", pkg.name, pkg.version, pkg.hash_str);
                 (true, None)
             }
         };
@@ -1353,10 +1499,10 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         }
 
         pkg_entries.push(PackageEntry {
-            name: node.name.clone(),
-            version: ver_str.clone(),
-            source: node.source.to_string(),
-            package_hash: hash_str.clone(),
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            source: pkg.source_type.clone(),
+            package_hash: pkg.hash_str.clone(),
             integrity: None,
             signature: None,
             repository: None,
@@ -1369,11 +1515,16 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         println!();
     }
 
-    // Save store index for future cache lookups
-    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+    // Save store index
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
 
     // Install transitive dependencies discovered from extracted packages
-    install_transitive_deps(&node_modules, &store, &mut store_index, &mut pkg_entries)?;
+    install_transitive_deps(&node_modules, &store, &store_index, &mut pkg_entries)?;
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
@@ -1405,14 +1556,14 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     Ok(())
 }
 
-fn fetch_and_store(
+fn fetch_and_store_parallel(
     store: &Store,
-    store_index: &mut HashMap<String, String>,
+    store_index: &Arc<Mutex<HashMap<String, String>>>,
     src: &Source,
     cache_key: &str,
     node: &crate::resolver::graph::Node,
     ver_str: &str,
-) -> Result<(Vec<u8>, String)> {
+) -> Option<(Vec<u8>, String)> {
     println!("  fetching {}@{}...", node.name, ver_str);
 
     let identity = crate::types::PackageIdentity {
@@ -1426,14 +1577,25 @@ fn fetch_and_store(
     let pkg_content = match src.fetch(&identity) {
         Ok(c) => c,
         Err(e) => {
-            return Err(anyhow::anyhow!("failed to fetch {}: {}", node.name, e));
+            eprintln!("  failed to fetch {}: {}", node.name, e);
+            return None;
         }
     };
 
-    let hash_str = store.put(&pkg_content)?;
-    store_index.insert(cache_key.to_string(), hash_str.clone());
+    let hash_str = match store.put(&pkg_content) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("  failed to store {}: {}", node.name, e);
+            return None;
+        }
+    };
 
-    Ok((pkg_content, hash_str))
+    {
+        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+        idx.insert(cache_key.to_string(), hash_str.clone());
+    }
+
+    Some((pkg_content, hash_str))
 }
 
 #[cfg(test)]

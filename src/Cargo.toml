@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 chrono = { version = "0.4", features = ["clock"] }
 semver = { version = "1", features = ["serde"] }
+rayon = "1"
 
 [features]
 nightly-bench = []
