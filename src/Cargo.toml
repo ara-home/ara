@@ -35,6 +35,9 @@ nightly-bench = []
 [dev-dependencies]
 mockito = "1"
 
+[lib]
+path = "lib.rs"
+
 [[bin]]
 name = "ara"
 path = "main.rs"

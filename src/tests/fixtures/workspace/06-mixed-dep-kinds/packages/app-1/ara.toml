@@ -1,0 +1,10 @@
+[project]
+name = "app-1"
+version = "0.1.0"
+
+[deps]
+shared = { source = "workspace" }
+typescript = { source = "npm", version = "^5.0.0", kind = "dev" }
+vitest = { source = "npm", version = "^1.0.0", kind = "dev" }
+react = { source = "npm", version = "^18.0.0", kind = "prod" }
+react-dom = { source = "npm", version = "^18.0.0", kind = "peer" }

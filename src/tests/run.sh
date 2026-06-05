@@ -2,7 +2,6 @@
 set -eu
 
 ARA_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="${ARA_DIR}/.zig-cache"
 PASS=0
 FAIL=0
 
@@ -19,25 +18,37 @@ trap cleanup EXIT
 
 # Build
 info "building ara..."
-(cd "$ARA_DIR" && zig build 2>/dev/null)
+(cd "$ARA_DIR" && cargo build --quiet 2>/dev/null)
 ok "build succeeded"
 
-ARABIN="${ARA_DIR}/zig-out/bin/ara"
+ARABIN="${ARA_DIR}/target/debug/ara"
 
 # ---- E2E: simple-app with local dep ----
 info "e2e: install local dependency"
 TMPDIR=$(mktemp -d /tmp/ara-e2e-XXXXXX)
 mkdir -p "$TMPDIR/project" "$TMPDIR/lib-a"
 
-cp "$ARA_DIR/tests/fixtures/lib-a/ara.toml" "$TMPDIR/lib-a/"
-cp "$ARA_DIR/tests/fixtures/simple-app/ara.toml" "$TMPDIR/project/"
+cp "$ARA_DIR/tests/fixtures/valid/01-minimal/ara.toml" "$TMPDIR/project/"
+# Create lib-a as a local dep
+cat > "$TMPDIR/lib-a/ara.toml" <<EOF
+[project]
+name = "lib-a"
+version = "0.1.0"
+EOF
 
-(cd "$TMPDIR/project" && "$ARABIN" install 2>&1) | grep -q "Installing dependencies for simple-app"
-if [ $? -eq 0 ]; then
-    ok "install prints project name"
-else
-    fail "install did not print project name"
-fi
+# Patch the minimal fixture to add a local dep
+cat > "$TMPDIR/project/ara.toml" <<EOF
+[project]
+name = "simple-app"
+version = "0.1.0"
+
+[deps]
+lib-a = { source = "local", path = "../lib-a" }
+EOF
+
+(cd "$TMPDIR/project" && "$ARABIN" install 2>&1) | grep -q "Installing dependencies for simple-app" \
+    && ok "install prints project name" \
+    || fail "install did not print project name"
 
 # Check node_modules exists
 if [ -d "$TMPDIR/project/node_modules/lib-a" ]; then

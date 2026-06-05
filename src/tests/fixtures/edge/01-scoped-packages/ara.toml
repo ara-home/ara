@@ -1,0 +1,10 @@
+[project]
+name = "scoped-pkgs"
+version = "0.1.0"
+
+[deps]
+"@scope/core" = { source = "npm", version = "1.0.0" }
+"@scope/utils" = { source = "npm", version = "2.0.0" }
+"@scope/types" = { source = "npm", version = "3.0.0" }
+"@scope/testing" = { source = "npm", version = "4.0.0" }
+"@scope/cli" = { source = "npm", version = "5.0.0" }

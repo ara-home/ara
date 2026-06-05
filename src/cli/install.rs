@@ -15,6 +15,25 @@ use crate::types::{Constraint, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
+fn write_lockfile(cwd: &Path, pkg_entries: &[PackageEntry]) -> Result<()> {
+    let ts = current_timestamp();
+    let lockfile = Lockfile {
+        version: 1,
+        graph: GraphMeta {
+            resolver: "mvs".to_string(),
+            generated_at: Some(ts),
+            graph_hash: None,
+        },
+        packages: pkg_entries.to_vec(),
+    };
+    let lock_content = crate::lockfile::generator::generate(&lockfile);
+    let lock_path = cwd.join("ara.lock");
+    let mut lock_f = std::fs::File::create(&lock_path)?;
+    lock_f.write_all(lock_content.as_bytes())?;
+    println!("Lockfile written to ara.lock");
+    Ok(())
+}
+
 fn current_timestamp() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -43,7 +62,9 @@ fn create_source(
 ) -> Result<Source> {
     Ok(match source_type {
         SourceType::Npm | SourceType::Registry => {
-            let url = dep.url.as_deref().unwrap_or("https://registry.npmjs.org");
+            let default_url = std::env::var("ARA_NPM_REGISTRY")
+                .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+            let url = dep.url.as_deref().unwrap_or(&default_url);
             Source::Registry(crate::source::registry::RegistrySource::new(
                 url.to_string(),
             ))
@@ -332,8 +353,9 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         }
     }
 
-    if m.deps.is_empty() {
+    if m.deps.is_empty() && m.workspace.is_none() {
         println!("No dependencies to install");
+        write_lockfile(cwd, &[]).context("failed to write lockfile")?;
         return Ok(());
     }
 

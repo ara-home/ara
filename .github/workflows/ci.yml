@@ -33,9 +33,13 @@ jobs:
         with:
           tool: cargo-deny
 
-      - name: Test
+      - name: Unit tests
         working-directory: src
-        run: cargo test --quiet
+        run: cargo test --lib --quiet
+
+      - name: Fixture tests
+        working-directory: src
+        run: cargo test --test fixture_test --quiet
 
       - name: Clippy
         working-directory: src

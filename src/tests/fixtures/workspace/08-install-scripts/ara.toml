@@ -1,0 +1,6 @@
+[project]
+name = "with-hooks"
+version = "0.1.0"
+
+[workspace]
+members = ["packages/hook-pkg"]

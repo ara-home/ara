@@ -1,0 +1,6 @@
+[project]
+name = "pkg-a"
+version = "0.1.0"
+
+[deps]
+pkg-b = { source = "workspace" }

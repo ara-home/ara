@@ -1,0 +1,6 @@
+[project]
+name = "mixed-kinds"
+version = "0.1.0"
+
+[workspace]
+members = ["packages/shared", "packages/app-1", "packages/app-2"]
