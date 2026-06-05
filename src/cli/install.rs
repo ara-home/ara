@@ -217,6 +217,17 @@ pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     cmd_install_in(&cwd, non_interactive)
 }
 
+pub(crate) fn cmd_install_specs(
+    _specs: &[String],
+    _save_dev: bool,
+    _save_peer: bool,
+    _save_optional: bool,
+    _range: Option<&str>,
+    _non_interactive: bool,
+) -> Result<()> {
+    anyhow::bail!("ara install <spec>: not yet implemented");
+}
+
 fn toml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

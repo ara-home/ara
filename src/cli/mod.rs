@@ -18,6 +18,20 @@ pub struct Cli {
 pub enum Commands {
     /// Install project dependencies
     Install {
+        /// Package specifiers to install directly (name, name@version, git URL, etc.)
+        deps: Vec<String>,
+        /// Save as dev dependency
+        #[arg(long)]
+        save_dev: bool,
+        /// Save as peer dependency
+        #[arg(long)]
+        save_peer: bool,
+        /// Save as optional dependency
+        #[arg(long)]
+        save_optional: bool,
+        /// Version range strategy: "exact" (default), "caret" (^), or "patch" (~)
+        #[arg(long)]
+        range: Option<String>,
         #[arg(long)]
         non_interactive: bool,
     },
@@ -50,7 +64,27 @@ pub enum Commands {
 impl Cli {
     pub fn run(&self) -> Result<()> {
         match &self.command {
-            Commands::Install { non_interactive } => install::cmd_install(*non_interactive),
+            Commands::Install {
+                deps,
+                save_dev,
+                save_peer,
+                save_optional,
+                range,
+                non_interactive,
+            } => {
+                if !deps.is_empty() {
+                    install::cmd_install_specs(
+                        deps,
+                        *save_dev,
+                        *save_peer,
+                        *save_optional,
+                        range.as_deref(),
+                        *non_interactive,
+                    )
+                } else {
+                    install::cmd_install(*non_interactive)
+                }
+            }
             Commands::Run { script, profile } => run::cmd_run(script, profile),
             Commands::Analyze { path } => analyze::cmd_analyze(path),
             Commands::Audit { path } => analyze::cmd_audit(path),
