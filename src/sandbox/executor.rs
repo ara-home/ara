@@ -2,6 +2,7 @@
 //! Supports three profiles: Hermetic (minimal syscalls), Restricted (safe syscalls),
 //! and Open (no restrictions).
 
+use std::collections::HashMap;
 use std::process::Command;
 
 #[cfg(unix)]
@@ -25,11 +26,21 @@ impl Executor {
         Self { config }
     }
 
-    pub fn execute(&self, command: &str) -> Result<(), ExecutorError> {
+    pub fn execute(
+        &self,
+        command: &str,
+        env: Option<HashMap<String, String>>,
+    ) -> Result<(), ExecutorError> {
         let profile = self.config.profile;
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+
+        if let Some(env) = env {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
 
         #[cfg(target_os = "linux")]
         unsafe {
