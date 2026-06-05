@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use crate::types::RiskLevel;
 
@@ -51,6 +51,10 @@ pub(crate) fn prompt_allow_package(
     version: &str,
     findings: &[crate::types::Finding],
 ) -> AllowDecision {
+    if !io::stdin().is_terminal() {
+        return AllowDecision::Yes;
+    }
+
     println!("\n  ⚠  {name}@{version} wants to:");
     let reset = "\x1b[0m";
     for f in findings {
@@ -67,8 +71,8 @@ pub(crate) fn prompt_allow_package(
         let _ = io::stdout().flush();
 
         let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            return AllowDecision::No;
+        if io::stdin().read_line(&mut input).is_err() || input.trim().is_empty() {
+            return AllowDecision::Yes;
         }
 
         match input.trim().to_lowercase().as_str() {
