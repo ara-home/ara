@@ -53,7 +53,7 @@ ara run build --profile hermetic
 
 ### Multiple package sources
 
-Ara can resolve and fetch dependencies from npm registries, GitHub repositories, git repositories, local paths, and workspace members — all defined in a single manifest file.
+Ara can resolve and fetch dependencies from npm registries, GitHub repositories, git repositories, tarball URLs, local paths, and workspace members — all defined in a single manifest file or installed directly via spec.
 
 ---
 
@@ -78,6 +78,8 @@ src/
 
 ### The install flow
 
+#### Manifest install (`ara install` with no args)
+
 1. **Parse** the manifest — reads `ara.toml` by default, or auto-detects `package.json` (generating `ara.toml` transparently)
 2. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
 3. **Fetch** tarballs from the appropriate source backend (registry, git, GitHub, local, workspace)
@@ -85,6 +87,18 @@ src/
 5. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
 6. **Extract** approved packages to the output directory and store them in the content-addressable store
 7. **Lock** the resolved graph into `ara.lock` for future reproducibility
+
+#### Direct spec install (`ara install <spec>`)
+
+1. **Parse** the spec string — determine target type (npm, GitHub, git, tarball)
+2. **Resolve** the version — query registry for latest/concrete, or use provided ref directly
+3. **Check cache** — skip download if already cached (unless `--force`/`--refresh`)
+4. **Fetch** the tarball from the appropriate backend
+5. **Analyze** the package by scanning source files for suspicious patterns
+6. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
+7. **Extract** to `node_modules/` and store in the content-addressable store
+8. **Bootstrap** a minimal `ara.toml` if no manifest exists
+9. **Write** the updated manifest and `ara.lock`
 
 ### The analysis engine
 
@@ -128,6 +142,47 @@ ara install --non-interactive  # Silent — useful for CI
 ```
 
 Works with existing npm projects out of the box — no migration step needed.
+
+#### Direct package install
+
+You can also install packages directly by spec without an existing manifest. Ara resolves the spec, bootstraps a minimal manifest, downloads and extracts the package, and writes the lockfile — all in one step.
+
+```bash
+ara install react                    # latest from npm registry
+ara install react@18.2.0             # exact version
+ara install zod@^3                   # range (resolved to latest matching)
+ara install --save-dev eslint        # save as dev dependency
+ara install --range=caret zod        # save with ^ prefix
+ara install react zod typescript     # multiple packages at once
+```
+
+Supported spec formats:
+
+| Format | Example | Target |
+|--------|---------|--------|
+| `name` | `react` | npm registry (latest) |
+| `name@version` | `react@18.2.0` | npm registry (exact) |
+| `name@^range` | `zod@^3.23.0` | npm registry (range) |
+| `@scope/name` | `@angular/core` | npm scoped package |
+| `@scope/name@version` | `@angular/core@17.0.0` | npm scoped exact |
+| `user/repo` | `facebook/react` | GitHub shorthand |
+| `user/repo#ref` | `facebook/react#v18.0.0` | GitHub with tag/branch |
+| Git URL | `https://github.com/user/repo.git` | Git repository |
+| Git URL + ref | `https://github.com/user/repo.git#v1.0` | Git with tag/branch |
+| Tarball URL | `https://example.com/pkg.tgz` | Direct tarball |
+| Local tarball | `./downloads/pkg.tar.gz` | Local file |
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--save-dev` | Save as dev dependency |
+| `--save-peer` | Save as peer dependency |
+| `--save-optional` | Save as optional dependency |
+| `--range` | Version range strategy: `exact` (default), `caret` (^), `patch` (~) |
+| `--force` | Re-download even if cached |
+| `--refresh` | Re-fetch for mutable references (branches, tags) |
+| `--offline` | Fail if package is not in cache |
 
 ### `ara run <script> --profile <profile>`
 
@@ -272,7 +327,7 @@ But Ara is not a clone of any of them. It's an experiment in what a package mana
 
 ## Project status
 
-Ara is in early development. Core install, run, and analysis features work. Build, publish, SBOM generation, and LAN distribution are on the roadmap.
+Ara is in early development. Core install (manifest-based and direct spec), run, and analysis features work. Direct install supports npm, GitHub, git, and tarball targets with caching and security scanning. Build, publish, SBOM generation, and LAN distribution are on the roadmap.
 
 ---
 
