@@ -356,8 +356,8 @@ fn install_transitive_deps(
             let content = std::fs::read_to_string(&pkg_json)?;
             let pkg: serde_json::Value = serde_json::from_str(&content)?;
 
-            // Collect from both `dependencies` and `peerDependencies`
-            let dep_sources = ["dependencies", "peerDependencies"];
+            // Collect from `dependencies`, `peerDependencies`, and `optionalDependencies`
+            let dep_sources = ["dependencies", "peerDependencies", "optionalDependencies"];
             let mut deps: Vec<(String, String)> = Vec::new();
             for key in &dep_sources {
                 if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
