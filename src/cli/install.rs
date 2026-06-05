@@ -11,7 +11,7 @@ use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
 use crate::source::Source;
 use crate::store::cas::Store;
-use crate::types::{Constraint, SourceType, Version};
+use crate::types::{Constraint, PackageIdentity, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
@@ -218,14 +218,453 @@ pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
 }
 
 pub(crate) fn cmd_install_specs(
-    _specs: &[String],
-    _save_dev: bool,
-    _save_peer: bool,
-    _save_optional: bool,
-    _range: Option<&str>,
-    _non_interactive: bool,
+    specs: &[String],
+    save_dev: bool,
+    save_peer: bool,
+    save_optional: bool,
+    range: Option<&str>,
+    non_interactive: bool,
 ) -> Result<()> {
-    anyhow::bail!("ara install <spec>: not yet implemented");
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    // Read or bootstrap a minimal manifest
+    let mut m = match read_manifest(&cwd) {
+        Ok(m) => m,
+        Err(_) => {
+            let dir_name = cwd
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string());
+            println!("No manifest found. Creating ara.toml for {dir_name}.");
+            crate::manifest::types::Manifest {
+                project: crate::manifest::types::Project {
+                    name: dir_name,
+                    version: "0.1.0".to_string(),
+                },
+                deps: vec![],
+                workspace: None,
+                scripts: vec![],
+                security: None,
+                build: None,
+                package_json_extras: None,
+            }
+        }
+    };
+
+    println!(
+        "Installing {} package(s) into {} v{}",
+        specs.len(),
+        m.project.name,
+        m.project.version
+    );
+
+    let dep_kind = if save_peer {
+        Some("peer".to_string())
+    } else if save_dev {
+        Some("dev".to_string())
+    } else if save_optional {
+        Some("optional".to_string())
+    } else {
+        None
+    };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let store_base = PathBuf::from(&home).join(".ara").join("store");
+    let store = Store::new(store_base.clone());
+    store.ensure_dirs()?;
+
+    let node_modules = cwd.join("node_modules");
+    if let Err(e) = std::fs::create_dir_all(&node_modules) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e).context("failed to create node_modules directory");
+        }
+    }
+
+    let index_path = store_base.join("index.json");
+    let mut store_index: HashMap<String, String> = if index_path.exists() {
+        let idx_content = std::fs::read_to_string(&index_path)?;
+        serde_json::from_str(&idx_content).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    let mut pkg_entries: Vec<PackageEntry> = Vec::new();
+
+    for spec in specs {
+        let target = crate::source::url::parse_install_spec(spec)
+            .with_context(|| format!("failed to parse spec: {spec}"))?;
+
+        let resolved = resolve_spec_target(&target, range)?;
+
+        if m.deps.iter().any(|d| d.name == resolved.name) {
+            println!("  {} already in manifest, skipping", resolved.name);
+            continue;
+        }
+
+        let ver_str = format!(
+            "{}.{}.{}",
+            resolved.version_semver.major,
+            resolved.version_semver.minor,
+            resolved.version_semver.patch
+        );
+
+        let cache_key = format!("{}@{}", resolved.name, ver_str);
+        let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
+            if store.contains(cached_hash) {
+                if let Some(content) = store.get(cached_hash)? {
+                    println!("  using cached {}@{}", resolved.name, ver_str);
+                    (content, cached_hash.clone())
+                } else {
+                    store_index.remove(&cache_key);
+                    fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
+                }
+            } else {
+                store_index.remove(&cache_key);
+                fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
+            }
+        } else {
+            fetch_target(&store, &mut store_index, &resolved, &cache_key, &ver_str)?
+        };
+
+        let pkg_dir = node_modules.join(&resolved.name);
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+        std::fs::create_dir_all(&pkg_dir)?;
+
+        if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
+            println!("  failed to extract {}: {}", resolved.name, e);
+            continue;
+        }
+
+        let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
+            Ok(result) => {
+                if result.findings.is_empty() {
+                    print!("  ✓ {}@{} ({})", resolved.name, ver_str, hash_str);
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(result.risk_level.to_string()),
+                        }),
+                    )
+                } else if non_interactive {
+                    let rl = result.risk_level;
+                    print!(
+                        "  ✓ {}@{} ({}) ⚠  {} finding(s) ({})",
+                        resolved.name,
+                        ver_str,
+                        hash_str,
+                        result.findings.len(),
+                        rl
+                    );
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(rl.to_string()),
+                        }),
+                    )
+                } else {
+                    match prompt_allow_package(&resolved.name, &ver_str, &result.findings) {
+                        AllowDecision::Yes | AllowDecision::Sandbox => {
+                            println!("  ✓ {}@{} ({}) — allowed", resolved.name, ver_str, hash_str);
+                            (
+                                true,
+                                Some(SecurityMeta {
+                                    risk_level: Some(result.risk_level.to_string()),
+                                }),
+                            )
+                        }
+                        AllowDecision::No => {
+                            let _ = std::fs::remove_dir_all(&pkg_dir);
+                            println!("  ✗ {}@{} ({}) — denied", resolved.name, ver_str, hash_str);
+                            (false, None)
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                print!("  ✓ {}@{} ({})", resolved.name, ver_str, hash_str);
+                (true, None)
+            }
+        };
+
+        if !allowed {
+            continue;
+        }
+
+        // Add to manifest
+        m.deps.push(crate::manifest::types::DependencyEntry {
+            name: resolved.name.clone(),
+            source: resolved.source.clone(),
+            kind: dep_kind.clone(),
+            version: Some(resolved.version.clone()),
+            repo: resolved.repo.clone(),
+            url: resolved.url.clone(),
+            commit: resolved.commit.clone(),
+            path: None,
+        });
+
+        pkg_entries.push(PackageEntry {
+            name: resolved.name.clone(),
+            version: ver_str.clone(),
+            source: resolved.source_type.to_string(),
+            package_hash: hash_str.clone(),
+            integrity: None,
+            signature: None,
+            repository: resolved.repo.clone(),
+            commit: resolved.commit.clone(),
+            dependencies: None,
+            security,
+            sbom: None,
+        });
+
+        println!();
+    }
+
+    // Save store index
+    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+
+    // Write updated ara.toml
+    let ara_toml_content = generate_ara_toml(&m);
+    std::fs::write(cwd.join("ara.toml"), &ara_toml_content).context("failed to write ara.toml")?;
+
+    println!("Updated ara.toml with {} dep(s)", m.deps.len());
+
+    // Write lockfile
+    write_lockfile(&cwd, &pkg_entries)?;
+
+    Ok(())
+}
+
+/// Resolved package information after parsing and fetching a spec.
+struct ResolvedPackage {
+    name: String,
+    version: String,
+    version_semver: Version,
+    source_type: SourceType,
+    source: String,
+    url: Option<String>,
+    repo: Option<String>,
+    commit: Option<String>,
+    pkg_content: Vec<u8>,
+}
+
+fn resolve_spec_target(
+    target: &crate::source::url::InstallTarget,
+    range: Option<&str>,
+) -> Result<ResolvedPackage> {
+    match target {
+        crate::source::url::InstallTarget::Npm { name, version } => {
+            resolve_npm_target(name, version.as_deref(), range)
+        }
+        crate::source::url::InstallTarget::Github { repo, commit } => {
+            resolve_github_target(repo, commit.as_deref())
+        }
+        crate::source::url::InstallTarget::Git { url, commit } => {
+            resolve_git_target(url, commit.as_deref())
+        }
+        crate::source::url::InstallTarget::Tarball { url } => resolve_tarball_target(url),
+    }
+}
+
+fn resolve_npm_target(
+    name: &str,
+    version: Option<&str>,
+    range: Option<&str>,
+) -> Result<ResolvedPackage> {
+    let registry_url = std::env::var("ARA_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+    let reg = crate::source::registry::RegistrySource::new(registry_url);
+
+    // Resolve the version from registry
+    let resolved_ver_str = if let Some(v) = version {
+        // User specified a version/range — try to resolve it
+        // For now, we use the registry to resolve even @^18 to the concrete version
+        // But we save the user's original spec verbatim
+        reg.resolve(name).unwrap_or_else(|_| v.to_string())
+    } else {
+        // No version specified, get latest from registry
+        reg.resolve(name)
+            .with_context(|| format!("failed to resolve {name}"))?
+    };
+
+    // Parse for identity
+    let parsed_ver = Version::parse(&resolved_ver_str)
+        .with_context(|| format!("invalid version from registry: {resolved_ver_str}"))?;
+
+    // Determine what version string to save in the manifest
+    let manifest_ver = if let Some(v) = version {
+        // User wrote react@^18 → save "^18" verbatim
+        v.to_string()
+    } else {
+        // User wrote react → save exact version (possibly with --range prefix)
+        apply_range(&resolved_ver_str, range)
+    };
+
+    let identity = PackageIdentity {
+        source: SourceType::Npm,
+        name: name.to_string(),
+        version: parsed_ver.clone(),
+        content_hash: None,
+    };
+
+    let pkg_content = reg
+        .fetch(&identity)
+        .with_context(|| format!("failed to fetch {name}@{resolved_ver_str}"))?;
+
+    Ok(ResolvedPackage {
+        name: name.to_string(),
+        version: manifest_ver,
+        version_semver: parsed_ver,
+        source_type: SourceType::Npm,
+        source: "npm".to_string(),
+        url: None,
+        repo: None,
+        commit: None,
+        pkg_content,
+    })
+}
+
+fn resolve_github_target(repo: &str, commit: Option<&str>) -> Result<ResolvedPackage> {
+    let src = crate::source::github::GithubSource::new(repo.to_string());
+
+    // GitHub source resolve returns the repo string
+    let _ = src.resolve(repo)?;
+
+    // We need a version. If a commit is given, use it. Otherwise "latest".
+    let ver_str = commit.unwrap_or("latest").to_string();
+    let parsed_ver = Version::new(0, 0, 0);
+
+    let identity = PackageIdentity {
+        source: SourceType::Github,
+        name: repo.to_string(),
+        version: parsed_ver.clone(),
+        content_hash: None,
+    };
+
+    let pkg_content = src
+        .fetch(&identity)
+        .with_context(|| format!("failed to fetch github:{repo}"))?;
+
+    Ok(ResolvedPackage {
+        name: repo.to_string(),
+        version: ver_str.clone(),
+        version_semver: parsed_ver,
+        source_type: SourceType::Github,
+        source: "github".to_string(),
+        url: None,
+        repo: Some(repo.to_string()),
+        commit: commit.map(|c| c.to_string()),
+        pkg_content,
+    })
+}
+
+fn resolve_git_target(url: &str, commit: Option<&str>) -> Result<ResolvedPackage> {
+    let commit_str = commit.unwrap_or("HEAD").to_string();
+    let src = crate::source::git::GitSource::new(url.to_string(), commit_str.clone());
+
+    let _ = src.resolve(url)?;
+    let parsed_ver = Version::new(0, 0, 0);
+
+    let identity = PackageIdentity {
+        source: SourceType::Git,
+        name: url.to_string(),
+        version: parsed_ver.clone(),
+        content_hash: None,
+    };
+
+    let pkg_content = src
+        .fetch(&identity)
+        .with_context(|| format!("failed to fetch git:{url}"))?;
+
+    // Derive package name from URL
+    let name = derive_name_from_git_url(url)
+        .unwrap_or_else(|| url.rsplit('/').next().unwrap_or(url).to_string());
+
+    Ok(ResolvedPackage {
+        name,
+        version: commit_str.clone(),
+        version_semver: parsed_ver,
+        source_type: SourceType::Git,
+        source: "git".to_string(),
+        url: Some(url.to_string()),
+        repo: None,
+        commit: Some(commit_str),
+        pkg_content,
+    })
+}
+
+fn resolve_tarball_target(url: &str) -> Result<ResolvedPackage> {
+    let src = crate::source::tarball::TarballSource::new(url.to_string());
+
+    let identity = PackageIdentity {
+        source: SourceType::Url,
+        name: url.to_string(),
+        version: Version::new(0, 0, 0),
+        content_hash: None,
+    };
+
+    let pkg_content = src
+        .fetch(&identity)
+        .with_context(|| format!("failed to download {url}"))?;
+
+    // Try to extract name/version from tarball
+    let (name, version) = crate::source::tarball::identity_from_tarball(&pkg_content)
+        .unwrap_or_else(|_| {
+            let fallback_name =
+                crate::source::tarball::name_from_url(url).unwrap_or_else(|| "package".to_string());
+            println!("  warning: could not read package.json from tarball, using {fallback_name}");
+            (fallback_name, "0.0.0".to_string())
+        });
+
+    let parsed_ver = Version::parse(&version).unwrap_or_else(|_| Version::new(0, 0, 0));
+
+    Ok(ResolvedPackage {
+        name,
+        version,
+        version_semver: parsed_ver,
+        source_type: SourceType::Url,
+        source: "url".to_string(),
+        url: Some(url.to_string()),
+        repo: None,
+        commit: None,
+        pkg_content,
+    })
+}
+
+fn apply_range(version: &str, range: Option<&str>) -> String {
+    match range {
+        Some("caret") => format!("^{version}"),
+        Some("patch") => format!("~{version}"),
+        _ => version.to_string(),
+    }
+}
+
+fn fetch_target(
+    store: &Store,
+    store_index: &mut HashMap<String, String>,
+    resolved: &ResolvedPackage,
+    cache_key: &str,
+    ver_str: &str,
+) -> Result<(Vec<u8>, String)> {
+    println!("  fetching {}@{}...", resolved.name, ver_str);
+    let hash_str = store.put(&resolved.pkg_content)?;
+    store_index.insert(cache_key.to_string(), hash_str.clone());
+    Ok((resolved.pkg_content.clone(), hash_str))
+}
+
+fn derive_name_from_git_url(url: &str) -> Option<String> {
+    // https://github.com/user/repo.git → "repo"
+    // git@github.com:user/repo.git → "repo"
+    // https://bitbucket.org/user/repo → "repo"
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let without_git = without_fragment
+        .strip_suffix(".git")
+        .unwrap_or(without_fragment);
+    let name = without_git.rsplit('/').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn toml_escape(s: &str) -> String {
