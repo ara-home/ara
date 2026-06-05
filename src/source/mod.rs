@@ -5,6 +5,7 @@ pub mod git;
 pub mod github;
 pub mod local;
 pub mod registry;
+pub mod tarball;
 pub mod url;
 pub mod workspace;
 
