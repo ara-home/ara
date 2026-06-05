@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -206,13 +206,27 @@ fn expand_workspace_members(
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
+
+    let mut raw_entries: Vec<(std::path::PathBuf, tar::EntryType, Vec<u8>)> = Vec::new();
     for entry in archive
         .entries()
         .context("failed to read tarball entries")?
     {
         let mut entry = entry.context("failed to read tarball entry")?;
-        let path = entry.path().context("failed to read entry path")?;
-        let stripped = path.strip_prefix("package").unwrap_or(&path);
+        let path = entry
+            .path()
+            .context("failed to read entry path")?
+            .into_owned();
+        let entry_type = entry.header().entry_type();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        raw_entries.push((path, entry_type, data));
+    }
+
+    let prefix = detect_tarball_prefix(&raw_entries);
+
+    for (path, entry_type, data) in &raw_entries {
+        let stripped = path.strip_prefix(&prefix).unwrap_or(path);
         if stripped.as_os_str().is_empty() {
             continue;
         }
@@ -220,9 +234,31 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        entry.unpack(target)?;
+        if *entry_type == tar::EntryType::Directory {
+            std::fs::create_dir_all(target)?;
+        } else {
+            std::fs::write(target, data)?;
+        }
     }
     Ok(())
+}
+
+fn detect_tarball_prefix(
+    entries: &[(std::path::PathBuf, tar::EntryType, Vec<u8>)],
+) -> std::path::PathBuf {
+    let first_comp = entries.first().and_then(|(p, _, _)| p.components().next());
+    let common = first_comp.filter(|comp| {
+        entries.iter().all(|(p, _, _)| {
+            let mut comps = p.components();
+            comps.next() == Some(*comp) && comps.next().is_some()
+        })
+    });
+
+    match common {
+        Some(comp) if comp.as_os_str() == "package" => std::path::PathBuf::from("package"),
+        Some(comp) => std::path::PathBuf::from(comp.as_os_str()),
+        None => std::path::PathBuf::new(),
+    }
 }
 
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
