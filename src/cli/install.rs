@@ -621,6 +621,9 @@ pub(crate) fn cmd_install_specs(
         write_lockfile(&cwd, Some(&store), &pkg_entries)?;
     }
 
+    // Resolve and install transitive dependencies
+    cmd_install_in(&cwd, non_interactive)?;
+
     Ok(())
 }
 
