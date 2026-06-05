@@ -261,6 +261,52 @@ fn detect_tarball_prefix(
     }
 }
 
+/// Create symlinks in `node_modules/.bin/` for the package's `bin` entries.
+fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Result<()> {
+    let pkg_json_path = pkg_dir.join("package.json");
+    if !pkg_json_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&pkg_json_path)
+        .context("failed to read package.json for bin links")?;
+    let pkg: serde_json::Value =
+        serde_json::from_str(&content).context("failed to parse package.json for bin links")?;
+
+    let bin_entries: Vec<(String, String)> = match pkg.get("bin") {
+        Some(serde_json::Value::String(cmd)) => {
+            vec![(pkg_name.to_string(), cmd.clone())]
+        }
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .filter(|(_, v)| !v.is_empty())
+            .collect(),
+        _ => return Ok(()),
+    };
+
+    if bin_entries.is_empty() {
+        return Ok(());
+    }
+
+    let bin_dir = node_modules.join(".bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    for (name, rel_path) in &bin_entries {
+        let link = bin_dir.join(name);
+        // Target is relative: ../pkg_name/rel_path
+        let target = format!("../{}/{}", pkg_name, rel_path);
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)
+            .with_context(|| format!("failed to create symlink {link:?} -> {target}"))?;
+        #[cfg(not(unix))]
+        std::fs::hard_link(pkg_dir.join(rel_path), &link)
+            .with_context(|| format!("failed to link {link:?}"))?;
+    }
+
+    Ok(())
+}
+
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
@@ -453,6 +499,13 @@ pub(crate) fn cmd_install_specs(
         if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
             println!("  failed to extract {}: {}", meta.name, e);
             continue;
+        }
+
+        if let Err(e) = install_bin_links(&node_modules, &meta.name, &pkg_dir) {
+            println!(
+                "  warning: failed to create bin links for {}: {}",
+                meta.name, e
+            );
         }
 
         let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
@@ -1042,6 +1095,13 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
             println!("  failed to extract {}: {}", node.name, e);
             continue;
+        }
+
+        if let Err(e) = install_bin_links(&node_modules, &node.name, &pkg_dir) {
+            println!(
+                "  warning: failed to create bin links for {}: {}",
+                node.name, e
+            );
         }
 
         let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
