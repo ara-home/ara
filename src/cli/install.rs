@@ -304,7 +304,18 @@ pub(crate) fn cmd_install_specs(
         HashMap::new()
     };
 
-    let mut pkg_entries: Vec<PackageEntry> = Vec::new();
+    // Seed pkg_entries from existing lockfile so we don't lose prior entries
+    let lock_path = cwd.join("ara.lock");
+    let mut pkg_entries: Vec<PackageEntry> = if lock_path.exists() {
+        let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
+            existing.packages
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     for spec in specs {
         let target = crate::source::url::parse_install_spec(spec)
@@ -314,6 +325,11 @@ pub(crate) fn cmd_install_specs(
 
         if m.deps.iter().any(|d| d.name == meta.name) {
             println!("  {} already in manifest, skipping", meta.name);
+            continue;
+        }
+
+        if pkg_entries.iter().any(|e| e.name == meta.name) {
+            println!("  {} already in lockfile, skipping", meta.name);
             continue;
         }
 
