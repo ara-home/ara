@@ -19,12 +19,9 @@ impl GithubSource {
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
-        let ver_str = format!(
-            "{}.{}.{}",
-            identity.version.major, identity.version.minor, identity.version.patch
-        );
+        let ref_str = identity.requested_ref.as_deref().unwrap_or("HEAD");
         let url = format!(
-            "https://api.github.com/repos/{repo}/tarball/v{ver_str}",
+            "https://api.github.com/repos/{repo}/tarball/{ref_str}",
             repo = self.repo
         );
         let body = client

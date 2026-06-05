@@ -60,6 +60,7 @@ mod tests {
             name: "test-pkg".to_string(),
             version: Version::parse("0.1.0").unwrap(),
             content_hash: None,
+            requested_ref: None,
         };
 
         let tarball = src.fetch(&id).unwrap();

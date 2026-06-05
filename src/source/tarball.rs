@@ -31,8 +31,8 @@ impl TarballSource {
 /// Extract the package name and version from a gzipped tarball's `package.json`.
 ///
 /// If the tarball has no `package.json` or it's malformed, returns an error.
-/// Tries `package/package.json` (npm convention) and falls back to any
-/// top-level `package.json` in the archive.
+/// Prefers `package/package.json` (npm convention) but falls back to any
+/// top-level `package.json` if the nested one is absent.
 pub fn identity_from_tarball(tarball: &[u8]) -> Result<(String, String), SourceError> {
     use std::io::Read;
 
@@ -40,6 +40,7 @@ pub fn identity_from_tarball(tarball: &[u8]) -> Result<(String, String), SourceE
     let mut archive = tar::Archive::new(decoder);
 
     let mut pkg_json_bytes: Option<Vec<u8>> = None;
+    let mut has_nested = false;
 
     for entry in archive
         .entries()
@@ -53,18 +54,20 @@ pub fn identity_from_tarball(tarball: &[u8]) -> Result<(String, String), SourceE
         })?;
 
         let path_str = path.to_string_lossy();
-        let is_package_json = path_str == "package/package.json"
-            || path_str == "./package/package.json"
-            || path_str == "package.json"
-            || path_str == "./package.json";
+        let is_nested = path_str == "package/package.json" || path_str == "./package/package.json";
+        let is_top = path_str == "package.json" || path_str == "./package.json";
 
-        if is_package_json {
+        if is_nested || (is_top && !has_nested) {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf).map_err(|e| {
                 SourceError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             })?;
-            pkg_json_bytes = Some(buf);
-            break;
+            if is_nested {
+                pkg_json_bytes = Some(buf);
+                has_nested = true;
+            } else if !has_nested {
+                pkg_json_bytes = Some(buf);
+            }
         }
     }
 
@@ -90,19 +93,19 @@ pub fn identity_from_tarball(tarball: &[u8]) -> Result<(String, String), SourceE
 
 /// Derive a package name from a tarball URL filename.
 ///
+/// Returns the filename without the archive extension. The caller is
+/// responsible for any further version-stripping logic.
+///
 /// Examples:
-/// - `https://example.com/pkg-1.2.3.tgz` → `pkg`
+/// - `https://example.com/pkg-1.2.3.tgz` → `pkg-1.2.3`
 /// - `./downloads/my-package.tgz` → `my-package`
 /// - `/tmp/foo.tar.gz` → `foo`
 pub fn name_from_url(url: &str) -> Option<String> {
     let filename = url.rsplit('/').next().filter(|s| !s.is_empty())?;
-    // Strip .tgz or .tar.gz suffix
     let stem = filename
         .strip_suffix(".tgz")
         .or_else(|| filename.strip_suffix(".tar.gz"))
         .or_else(|| filename.strip_suffix(".tar"))?;
-    // Try to strip trailing version like -1.2.3
-    // We just return the stem — the caller can do smarter parsing
     Some(stem.to_string())
 }
 

@@ -161,6 +161,7 @@ mod tests {
             name: "zod".to_string(),
             version: crate::types::Version::parse("3.23.8").unwrap(),
             content_hash: None,
+            requested_ref: None,
         };
         let result = src.fetch(&identity).unwrap();
         assert_eq!(result, tarball);

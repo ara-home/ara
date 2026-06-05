@@ -256,6 +256,8 @@ pub struct PackageIdentity {
     pub name: String,
     pub version: Version,
     pub content_hash: Option<String>,
+    /// Optional ref (branch, tag, commit SHA) for git/GitHub sources.
+    pub requested_ref: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

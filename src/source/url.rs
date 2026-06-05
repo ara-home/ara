@@ -152,7 +152,7 @@ fn parse_url_spec(spec: &str) -> Result<InstallTarget, ParseSpecError> {
     // Tarball: ends with .tgz or .tar.gz
     if url_part.ends_with(".tgz") || url_part.ends_with(".tar.gz") {
         return Ok(InstallTarget::Tarball {
-            url: spec.to_string(),
+            url: url_part.to_string(),
         });
     }
 
