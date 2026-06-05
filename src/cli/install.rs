@@ -323,6 +323,150 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
     Ok(())
 }
 
+/// Scan `node_modules/<pkg>/package.json` for each installed package and
+/// recursively install any missing transitive dependencies.
+fn install_transitive_deps(
+    node_modules: &Path,
+    store: &Store,
+    store_index: &mut HashMap<String, String>,
+    pkg_entries: &mut Vec<PackageEntry>,
+) -> Result<()> {
+    let registry_url = std::env::var("ARA_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+
+    let mut installed_any = true;
+    while installed_any {
+        installed_any = false;
+
+        let dirs: Vec<PathBuf> = std::fs::read_dir(node_modules)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().ok().is_some_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|s| s.to_str()) != Some(".bin"))
+            .collect();
+
+        for pkg_dir in &dirs {
+            let pkg_json = pkg_dir.join("package.json");
+            if !pkg_json.exists() {
+                continue;
+            }
+            let content = std::fs::read_to_string(&pkg_json)?;
+            let pkg: serde_json::Value = serde_json::from_str(&content)?;
+
+            // Collect from both `dependencies` and `peerDependencies`
+            let dep_sources = ["dependencies", "peerDependencies"];
+            let mut deps: Vec<(String, String)> = Vec::new();
+            for key in &dep_sources {
+                if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
+                    for (name, ver) in map {
+                        if let Some(ver_str) = ver.as_str() {
+                            deps.push((name.clone(), ver_str.to_string()));
+                        }
+                    }
+                }
+            }
+
+            for (dep_name, dep_ver_str) in &deps {
+                let dep_dir = node_modules.join(dep_name);
+                if dep_dir.exists() {
+                    continue;
+                }
+
+                println!("  installing transitive dep: {}@{}", dep_name, dep_ver_str);
+
+                let reg = crate::source::registry::RegistrySource::new(registry_url.clone());
+                let resolved_ver = match reg.resolve(dep_name) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!("    warning: cannot resolve {}: {}", dep_name, e);
+                        continue;
+                    }
+                };
+                let parsed_ver = match Version::parse(&resolved_ver) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let identity = PackageIdentity {
+                    source: SourceType::Npm,
+                    name: dep_name.clone(),
+                    version: parsed_ver.clone(),
+                    content_hash: None,
+                    requested_ref: None,
+                };
+
+                let short_ver = format!(
+                    "{}.{}.{}",
+                    parsed_ver.major, parsed_ver.minor, parsed_ver.patch
+                );
+                let cache_key = format!("npm:{}@{}", dep_name, short_ver);
+
+                let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key)
+                {
+                    if store.contains(cached_hash) {
+                        if let Some(content) = store.get(cached_hash)? {
+                            println!("    using cached {}@{}", dep_name, short_ver);
+                            (content, cached_hash.clone())
+                        } else {
+                            store_index.remove(&cache_key);
+                            let content = reg.fetch(&identity)?;
+                            let hash = store.put(&content)?;
+                            store_index.insert(cache_key, hash.clone());
+                            (content, hash)
+                        }
+                    } else {
+                        store_index.remove(&cache_key);
+                        let content = reg.fetch(&identity)?;
+                        let hash = store.put(&content)?;
+                        store_index.insert(cache_key, hash.clone());
+                        (content, hash)
+                    }
+                } else {
+                    let content = reg.fetch(&identity)?;
+                    let hash = store.put(&content)?;
+                    store_index.insert(cache_key, hash.clone());
+                    (content, hash)
+                };
+
+                std::fs::create_dir_all(&dep_dir)?;
+                if let Err(e) = extract_tarball(&pkg_content, &dep_dir) {
+                    println!("    failed to extract {}: {}", dep_name, e);
+                    let _ = std::fs::remove_dir_all(&dep_dir);
+                    continue;
+                }
+
+                if let Err(e) = install_bin_links(node_modules, dep_name, &dep_dir) {
+                    println!(
+                        "    warning: failed to create bin links for {}: {}",
+                        dep_name, e
+                    );
+                }
+
+                pkg_entries.push(PackageEntry {
+                    name: dep_name.clone(),
+                    version: short_ver,
+                    source: "npm".to_string(),
+                    package_hash: hash_str,
+                    integrity: None,
+                    signature: None,
+                    repository: None,
+                    commit: None,
+                    dependencies: None,
+                    security: None,
+                    sbom: None,
+                });
+
+                installed_any = true;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
@@ -621,8 +765,8 @@ pub(crate) fn cmd_install_specs(
         write_lockfile(&cwd, Some(&store), &pkg_entries)?;
     }
 
-    // Resolve and install transitive dependencies
-    cmd_install_in(&cwd, non_interactive)?;
+    // Install transitive dependencies discovered from the newly installed packages
+    install_transitive_deps(&node_modules, &store, &mut store_index, &mut pkg_entries)?;
 
     Ok(())
 }
@@ -1201,6 +1345,9 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     // Save store index for future cache lookups
     std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+
+    // Install transitive dependencies discovered from extracted packages
+    install_transitive_deps(&node_modules, &store, &mut store_index, &mut pkg_entries)?;
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
