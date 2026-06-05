@@ -18,6 +18,7 @@ pub enum SourceType {
     Github,
     Registry,
     Npm,
+    Url,
 }
 
 impl fmt::Display for SourceType {
@@ -29,6 +30,7 @@ impl fmt::Display for SourceType {
             Self::Github => write!(f, "github"),
             Self::Registry => write!(f, "registry"),
             Self::Npm => write!(f, "npm"),
+            Self::Url => write!(f, "url"),
         }
     }
 }
@@ -48,6 +50,7 @@ impl FromStr for SourceType {
             "github" => Ok(Self::Github),
             "registry" => Ok(Self::Registry),
             "npm" => Ok(Self::Npm),
+            "url" => Ok(Self::Url),
             _ => Err(UnknownSourceType(s.to_owned())),
         }
     }

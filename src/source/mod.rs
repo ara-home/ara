@@ -31,6 +31,7 @@ pub enum Source {
     Git(git::GitSource),
     Github(github::GithubSource),
     Registry(registry::RegistrySource),
+    Url(tarball::TarballSource),
 }
 
 impl Source {
@@ -41,6 +42,7 @@ impl Source {
             Self::Git(s) => s.resolve(name),
             Self::Github(s) => s.resolve(name),
             Self::Registry(s) => s.resolve(name),
+            Self::Url(s) => s.resolve(name),
         }
     }
 
@@ -51,6 +53,7 @@ impl Source {
             Self::Git(s) => s.fetch(identity),
             Self::Github(s) => s.fetch(identity),
             Self::Registry(s) => s.fetch(identity),
+            Self::Url(s) => s.fetch(identity),
         }
     }
 }

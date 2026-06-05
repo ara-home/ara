@@ -52,6 +52,7 @@ fn source_type_from_str(s: &str) -> SourceType {
         "git" => SourceType::Git,
         "local" => SourceType::Local,
         "workspace" => SourceType::Workspace,
+        "url" => SourceType::Url,
         _ => SourceType::Npm,
     }
 }
@@ -90,6 +91,10 @@ fn create_source(
                 .as_deref()
                 .context("missing path for local source")?;
             Source::Local(crate::source::local::LocalSource::new(path.to_string()))
+        }
+        SourceType::Url => {
+            let url = dep.url.as_deref().context("missing url for url source")?;
+            Source::Url(crate::source::tarball::TarballSource::new(url.to_string()))
         }
         SourceType::Workspace => {
             let path = dep.path.as_deref().unwrap_or(".");
