@@ -1,6 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphMeta {
     #[serde(default = "default_resolver")]
     pub resolver: String,
@@ -12,17 +12,17 @@ fn default_resolver() -> String {
     "mvs".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityMeta {
     pub risk_level: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SbomMeta {
     pub license: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageEntry {
     pub name: String,
     pub version: String,
@@ -37,7 +37,7 @@ pub struct PackageEntry {
     pub sbom: Option<SbomMeta>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lockfile {
     #[serde(default)]
     pub version: u32,

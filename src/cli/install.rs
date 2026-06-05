@@ -15,14 +15,27 @@ use crate::types::{Constraint, PackageIdentity, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
-fn write_lockfile(cwd: &Path, pkg_entries: &[PackageEntry]) -> Result<()> {
+fn write_lockfile(cwd: &Path, store: Option<&Store>, pkg_entries: &[PackageEntry]) -> Result<()> {
     let ts = current_timestamp();
+
+    let graph_hash = store.and_then(|_| {
+        if pkg_entries.is_empty() {
+            None
+        } else {
+            let graph_bytes = serde_json::to_vec(pkg_entries).ok()?;
+            let raw = crate::util::hash::compute(&graph_bytes);
+            let hex = crate::util::hash::hex_encode(&raw);
+            let store_hash = store?.put_graph(&graph_bytes).ok()?;
+            Some(format!("sha256:{hex} (store: {store_hash})"))
+        }
+    });
+
     let lockfile = Lockfile {
         version: 1,
         graph: GraphMeta {
             resolver: "mvs".to_string(),
             generated_at: Some(ts),
-            graph_hash: None,
+            graph_hash,
         },
         packages: pkg_entries.to_vec(),
     };
@@ -291,7 +304,18 @@ pub(crate) fn cmd_install_specs(
         HashMap::new()
     };
 
-    let mut pkg_entries: Vec<PackageEntry> = Vec::new();
+    // Seed pkg_entries from existing lockfile so we don't lose prior entries
+    let lock_path = cwd.join("ara.lock");
+    let mut pkg_entries: Vec<PackageEntry> = if lock_path.exists() {
+        let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
+            existing.packages
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     for spec in specs {
         let target = crate::source::url::parse_install_spec(spec)
@@ -301,6 +325,11 @@ pub(crate) fn cmd_install_specs(
 
         if m.deps.iter().any(|d| d.name == meta.name) {
             println!("  {} already in manifest, skipping", meta.name);
+            continue;
+        }
+
+        if pkg_entries.iter().any(|e| e.name == meta.name) {
+            println!("  {} already in lockfile, skipping", meta.name);
             continue;
         }
 
@@ -484,7 +513,7 @@ pub(crate) fn cmd_install_specs(
     println!("Updated ara.toml with {} dep(s)", m.deps.len());
 
     if !pkg_entries.is_empty() {
-        write_lockfile(&cwd, &pkg_entries)?;
+        write_lockfile(&cwd, Some(&store), &pkg_entries)?;
     }
 
     Ok(())
@@ -842,7 +871,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     if m.deps.is_empty() && m.workspace.is_none() {
         println!("No dependencies to install");
-        write_lockfile(cwd, &[]).context("failed to write lockfile")?;
+        write_lockfile(cwd, None, &[]).context("failed to write lockfile")?;
         return Ok(());
     }
 
