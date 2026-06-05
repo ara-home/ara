@@ -47,6 +47,16 @@ impl Store {
         self.base_path.join("graphs").join(graph_hash)
     }
 
+    #[must_use]
+    pub fn get_extracted_path(&self, hash_str: &str) -> PathBuf {
+        self.base_path.join("extracted").join(hash_str)
+    }
+
+    #[must_use]
+    pub fn has_extracted(&self, hash_str: &str) -> bool {
+        self.get_extracted_path(hash_str).exists()
+    }
+
     pub fn put(&self, bytes: &[u8]) -> Result<String, StoreError> {
         let raw_hash = hash::compute(bytes);
         let hex = hash::hex_encode(&raw_hash);

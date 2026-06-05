@@ -455,40 +455,27 @@ fn install_transitive_deps(
                     idx.get(&cache_key).cloned()
                 };
 
-                let (pkg_content, hash_str) = if let Some(cached_hash) = cache_lookup {
+                let hash_str = if let Some(cached_hash) = cache_lookup {
                     if store.contains(&cached_hash) {
-                        match store.get(&cached_hash) {
-                            Ok(Some(content)) => {
-                                println!("    using cached {}@{}", dep_name, short_ver);
-                                (content, cached_hash)
-                            }
-                            _ => {
-                                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                                idx.remove(&cache_key);
-                                match reg.fetch(&identity) {
-                                    Ok(content) => {
-                                        let hash = store.put(&content).ok()?;
-                                        idx.insert(cache_key, hash.clone());
-                                        (content, hash)
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "    warning: failed to fetch {}: {}",
-                                            dep_name, e
-                                        );
-                                        return None;
-                                    }
-                                }
-                            }
-                        }
+                        println!("    using cached {}@{}", dep_name, short_ver);
+                        cached_hash
                     } else {
                         let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
                         idx.remove(&cache_key);
                         match reg.fetch(&identity) {
                             Ok(content) => {
-                                let hash = store.put(&content).ok()?;
+                                let hash = match store.put(&content) {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "    warning: failed to store {}: {}",
+                                            dep_name, e
+                                        );
+                                        return None;
+                                    }
+                                };
                                 idx.insert(cache_key, hash.clone());
-                                (content, hash)
+                                hash
                             }
                             Err(e) => {
                                 eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
@@ -500,9 +487,15 @@ fn install_transitive_deps(
                     let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
                     match reg.fetch(&identity) {
                         Ok(content) => {
-                            let hash = store.put(&content).ok()?;
+                            let hash = match store.put(&content) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    eprintln!("    warning: failed to store {}: {}", dep_name, e);
+                                    return None;
+                                }
+                            };
                             idx.insert(cache_key, hash.clone());
-                            (content, hash)
+                            hash
                         }
                         Err(e) => {
                             eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
@@ -511,10 +504,8 @@ fn install_transitive_deps(
                     }
                 };
 
-                std::fs::create_dir_all(&dep_dir).ok()?;
-                if let Err(e) = extract_tarball(&pkg_content, &dep_dir) {
+                if let Err(e) = extract_package_cached(store, &hash_str, &dep_dir) {
                     eprintln!("    failed to extract {}: {}", dep_name, e);
-                    let _ = std::fs::remove_dir_all(&dep_dir);
                     return None;
                 }
 
@@ -1364,27 +1355,10 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                 idx.get(&cache_key).cloned()
             };
 
-            let (pkg_content, hash_str) = if let Some(cached_hash) = cached {
+            let hash_str = if let Some(cached_hash) = cached {
                 if store.contains(&cached_hash) {
-                    match store.get(&cached_hash) {
-                        Ok(Some(content)) => {
-                            println!("  using cached {}@{}", node.name, ver_str);
-                            (content, cached_hash)
-                        }
-                        _ => {
-                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                            idx.remove(&cache_key);
-                            drop(idx);
-                            fetch_and_store_parallel(
-                                &store,
-                                &store_index,
-                                &src,
-                                &cache_key,
-                                node,
-                                &ver_str,
-                            )?
-                        }
-                    }
+                    println!("  using cached {}@{}", node.name, ver_str);
+                    cached_hash
                 } else {
                     let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
                     idx.remove(&cache_key);
@@ -1403,10 +1377,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
             };
 
             let pkg_dir = node_modules.join(&node.name);
-            let _ = std::fs::remove_dir_all(&pkg_dir);
-            std::fs::create_dir_all(&pkg_dir).ok()?;
-
-            if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
+            if let Err(e) = extract_package_cached(&store, &hash_str, &pkg_dir) {
                 eprintln!("  failed to extract {}: {}", node.name, e);
                 return None;
             }
@@ -1563,7 +1534,7 @@ fn fetch_and_store_parallel(
     cache_key: &str,
     node: &crate::resolver::graph::Node,
     ver_str: &str,
-) -> Option<(Vec<u8>, String)> {
+) -> Option<String> {
     println!("  fetching {}@{}...", node.name, ver_str);
 
     let identity = crate::types::PackageIdentity {
@@ -1595,7 +1566,62 @@ fn fetch_and_store_parallel(
         idx.insert(cache_key.to_string(), hash_str.clone());
     }
 
-    Some((pkg_content, hash_str))
+    Some(hash_str)
+}
+
+/// Extract a tarball from the CAS store to the package directory.
+/// Uses a cached extracted directory in the store to avoid re-extraction.
+fn extract_package_cached(store: &Store, hash_str: &str, pkg_dir: &Path) -> Result<()> {
+    let extracted_dir = store.get_extracted_path(hash_str);
+
+    if !extracted_dir.exists() {
+        let content = store
+            .get(hash_str)?
+            .ok_or_else(|| anyhow::anyhow!("package {hash_str} not in store"))?;
+        std::fs::create_dir_all(&extracted_dir)
+            .with_context(|| format!("failed to create {}", extracted_dir.display()))?;
+        extract_tarball(&content, &extracted_dir)
+            .with_context(|| format!("failed to extract to {}", extracted_dir.display()))?;
+    }
+
+    let _ = std::fs::remove_dir_all(pkg_dir);
+    hardlink_dir(&extracted_dir, pkg_dir)
+        .with_context(|| format!("failed to hardlink to {}", pkg_dir.display()))
+}
+
+/// Recursively create hardlinks from `src` to `dst`, falling back to copy
+/// if hardlinking across filesystems fails.
+fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry?;
+        let relative = entry
+            .path()
+            .strip_prefix(src)
+            .map_err(|_| anyhow::anyhow!("path prefix error"))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dst.join(relative);
+
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_symlink() {
+            let link_target = std::fs::read_link(entry.path())?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_file(&target);
+            std::os::unix::fs::symlink(&link_target, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if std::fs::hard_link(entry.path(), &target).is_err() {
+                let _ = std::fs::copy(entry.path(), &target);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
