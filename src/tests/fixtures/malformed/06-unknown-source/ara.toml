@@ -1,0 +1,6 @@
+[project]
+name = "bad-source"
+version = "0.1.0"
+
+[deps]
+evil = { source = "invalid", version = "1.0.0" }

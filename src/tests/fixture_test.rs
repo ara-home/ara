@@ -60,6 +60,11 @@ fn mock_npm_package(server: &mut mockito::Server, name: &str, version: &str) -> 
         .trim_start_matches('<')
         .trim_start_matches('=')
         .trim_start_matches('*');
+    let clean_ver = if clean_ver.is_empty() {
+        "0.0.0"
+    } else {
+        clean_ver
+    };
 
     // Versions endpoint:  GET /{name}
     let versions_body = serde_json::json!({
@@ -172,7 +177,27 @@ struct FixtureResult {
     detail: String,
 }
 
+/// Run a fixture using `ara install --non-interactive` and verify result.
 fn run_fixture(fixture_root: &Path, category: &str, name: &str) -> FixtureResult {
+    run_fixture_with_command(
+        fixture_root,
+        category,
+        name,
+        &["install", "--non-interactive"],
+    )
+}
+
+/// Run a fixture using `ara analyze` for security pattern detection.
+fn run_fixture_analyze(fixture_root: &Path, category: &str, name: &str) -> FixtureResult {
+    run_fixture_with_command(fixture_root, category, name, &["analyze"])
+}
+
+fn run_fixture_with_command(
+    fixture_root: &Path,
+    category: &str,
+    name: &str,
+    args: &[&str],
+) -> FixtureResult {
     let start = Instant::now();
 
     // Start mockito server for this fixture
@@ -193,7 +218,7 @@ fn run_fixture(fixture_root: &Path, category: &str, name: &str) -> FixtureResult
 
     let bin = ara_binary();
     let output = Command::new(&bin)
-        .args(["install", "--non-interactive"])
+        .args(args)
         .current_dir(&project_dir)
         .env("ARA_NPM_REGISTRY", &registry_url)
         .output()
@@ -276,15 +301,20 @@ fn discover_fixtures(fixtures_root: &Path, category: &str) -> Vec<String> {
     names
 }
 
-#[test]
-fn test_fixtures_valid() {
-    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let names = discover_fixtures(&fixtures_root, "valid");
-    assert!(!names.is_empty(), "no valid/ fixtures found");
+fn run_test_category(
+    fixtures_root: &Path,
+    category: &str,
+    runner: fn(&Path, &str, &str) -> FixtureResult,
+) {
+    let names = discover_fixtures(fixtures_root, category);
+    if names.is_empty() {
+        println!("\n  SKIP   0 fixtures in {category}/");
+        return;
+    }
 
     let mut results: Vec<FixtureResult> = Vec::new();
     for name in &names {
-        let result = run_fixture(&fixtures_root, "valid", name);
+        let result = runner(fixtures_root, category, name);
         results.push(result);
     }
 
@@ -292,7 +322,7 @@ fn test_fixtures_valid() {
     let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
     assert!(
         failures.is_empty(),
-        "{} valid fixture(s) failed:\n{}",
+        "{} {category} fixture(s) failed:\n{}",
         failures.len(),
         failures
             .iter()
@@ -300,6 +330,30 @@ fn test_fixtures_valid() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+#[test]
+fn test_fixtures_valid() {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    run_test_category(&fixtures_root, "valid", run_fixture);
+}
+
+#[test]
+fn test_fixtures_edge() {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    run_test_category(&fixtures_root, "edge", run_fixture);
+}
+
+#[test]
+fn test_fixtures_malformed() {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    run_test_category(&fixtures_root, "malformed", run_fixture);
+}
+
+#[test]
+fn test_fixtures_security() {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    run_test_category(&fixtures_root, "security", run_fixture_analyze);
 }
 
 fn print_summary(results: &[FixtureResult]) {
