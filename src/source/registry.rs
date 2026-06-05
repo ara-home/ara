@@ -61,8 +61,10 @@ impl RegistrySource {
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let ver_str = identity.version.to_string();
+        // For scoped packages (@scope/name), the tarball filename uses only the bare name
+        let bare_name = identity.name.rsplit('/').next().unwrap_or(&identity.name);
         let tarball_url = format!(
-            "{}/{name}/-/{name}-{ver_str}.tgz",
+            "{}/{name}/-/{bare_name}-{ver_str}.tgz",
             self.registry_url,
             name = identity.name
         );
@@ -214,6 +216,53 @@ mod tests {
         };
         let result = src.fetch(&identity).unwrap();
         assert_eq!(result, b"fake-next-tarball");
+    }
+
+    #[test]
+    fn test_resolve_scoped_package() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let body = serde_json::json!({
+            "dist-tags": { "latest": "2.0.13" },
+            "versions": {
+                "2.0.13": {},
+                "1.0.0": {}
+            }
+        });
+
+        let _mock = server
+            .mock("GET", "/@types/mdx")
+            .with_status(200)
+            .with_body(body.to_string())
+            .create();
+
+        let src = RegistrySource::new(format!("{url}"));
+        let version = src.resolve("@types/mdx").unwrap();
+        assert_eq!(version, "2.0.13");
+    }
+
+    #[test]
+    fn test_fetch_scoped_package_tarball() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        // Scoped tarball URL uses bare name: mdx-2.0.13.tgz (not @types/mdx-2.0.13.tgz)
+        let _mock = server
+            .mock("GET", "/@types/mdx/-/mdx-2.0.13.tgz")
+            .with_status(200)
+            .with_body(b"fake-mdx-tarball")
+            .create();
+
+        let src = RegistrySource::new(format!("{url}"));
+        let identity = crate::types::PackageIdentity {
+            source: crate::types::SourceType::Npm,
+            name: "@types/mdx".to_string(),
+            version: crate::types::Version::parse("2.0.13").unwrap(),
+            content_hash: None,
+            requested_ref: None,
+        };
+        let result = src.fetch(&identity).unwrap();
+        assert_eq!(result, b"fake-mdx-tarball");
     }
 
     #[test]

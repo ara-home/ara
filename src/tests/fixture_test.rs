@@ -66,15 +66,19 @@ fn mock_npm_package(server: &mut mockito::Server, name: &str, version: &str) -> 
         clean_ver
     };
 
+    // For scoped packages (@scope/name), the tarball filename uses only the bare name
+    let bare_name = name.rsplit('/').next().unwrap_or(name);
+
     // Versions endpoint:  GET /{name}
     let versions_body = serde_json::json!({
         "name": name,
+        "dist-tags": { "latest": clean_ver },
         "versions": {
             clean_ver: {
                 "name": name,
                 "version": clean_ver,
                 "dist": {
-                    "tarball": format!("{}/{}/-/{}-{}.tgz", server.url(), name, name, clean_ver)
+                    "tarball": format!("{}/{}/-/{}-{}.tgz", server.url(), name, bare_name, clean_ver)
                 }
             }
         }
@@ -86,10 +90,13 @@ fn mock_npm_package(server: &mut mockito::Server, name: &str, version: &str) -> 
         .with_body(versions_body.to_string())
         .create();
 
-    // Tarball endpoint:  GET /{name}/-/{name}-{version}.tgz
+    // Tarball endpoint:  GET /{name}/-/{bare_name}-{version}.tgz
     let tarball = make_minimal_tarball();
     let m2 = server
-        .mock("GET", format!("/{name}/-/{name}-{clean_ver}.tgz").as_str())
+        .mock(
+            "GET",
+            format!("/{name}/-/{bare_name}-{clean_ver}.tgz").as_str(),
+        )
         .with_status(200)
         .with_header("content-type", "application/octet-stream")
         .with_body(tarball)
