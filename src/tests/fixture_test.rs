@@ -232,7 +232,7 @@ fn run_fixture_with_command(
     let lockfile_exists = lockfile.exists();
 
     let (should_succeed, check_lockfile) = match category {
-        "valid" | "edge" => (true, true),
+        "valid" | "edge" | "workspace" => (true, true),
         "malformed" => (false, false),
         _ => (true, false),
     };
@@ -354,6 +354,12 @@ fn test_fixtures_malformed() {
 fn test_fixtures_security() {
     let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     run_test_category(&fixtures_root, "security", run_fixture_analyze);
+}
+
+#[test]
+fn test_fixtures_workspace() {
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    run_test_category(&fixtures_root, "workspace", run_fixture);
 }
 
 fn print_summary(results: &[FixtureResult]) {

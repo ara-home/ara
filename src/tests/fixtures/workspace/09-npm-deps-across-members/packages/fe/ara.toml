@@ -1,0 +1,7 @@
+[project]
+name = "fe"
+version = "0.1.0"
+
+[deps]
+react = { source = "npm", version = "^18.0.0" }
+lib = { source = "workspace" }

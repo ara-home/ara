@@ -1,0 +1,8 @@
+{
+  "name": "root-pkgjson",
+  "version": "0.1.0",
+  "workspaces": ["packages/lib-x"],
+  "dependencies": {
+    "zod": "^3.0.0"
+  }
+}
