@@ -1,10 +1,20 @@
-.PHONY: all build bundle test test-e2e test-fixtures test-all lint audit deny udeps ci clean install-hooks
+.PHONY: all build install bundle test test-e2e test-fixtures test-all lint audit deny udeps ci clean install-hooks
 
 all: build
 
 build:
 	@echo "  BUILD  ara"
 	@cd src && cargo build --quiet 2>&1
+
+install:
+	@echo "  BUILD  ara (release)"
+	@cd src && cargo build --quiet --release 2>&1
+	@mkdir -p .bin
+	@cp target/release/ara .bin/ara
+	@echo "  INSTALL ara -> .bin/ara"
+	@echo ""
+	@echo "Add .bin to your PATH:"
+	@echo "  export PATH=\"$$(pwd)/.bin:\$$PATH\""
 
 bundle: build
 	@scripts/bundle.sh
