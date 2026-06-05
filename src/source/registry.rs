@@ -1,6 +1,11 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
 use crate::source::SourceError;
 use crate::types::{Constraint, PackageIdentity, Version};
 use crate::util::http::HttpClient;
+
+const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 pub struct RegistrySource {
     pub registry_url: String,
@@ -12,7 +17,17 @@ impl RegistrySource {
         Self { registry_url }
     }
 
-    pub fn resolve(&self, name: &str) -> Result<String, SourceError> {
+    /// Fetch package metadata from the registry, using a local disk cache
+    /// for the default npm registry to avoid redundant HTTP requests.
+    fn fetch_metadata(&self, name: &str) -> Result<serde_json::Value, SourceError> {
+        let use_cache = self.registry_url.contains("registry.npmjs.org");
+
+        if use_cache {
+            if let Some(cached) = Self::read_cached_metadata(name) {
+                return Ok(cached);
+            }
+        }
+
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let url = format!("{}/{name}", self.registry_url);
         let body = client
@@ -21,6 +36,65 @@ impl RegistrySource {
 
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
+
+        if use_cache {
+            Self::write_cached_metadata(name, &parsed);
+        }
+
+        Ok(parsed)
+    }
+
+    fn cache_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".ara")
+                .join("cache")
+                .join("metadata"),
+        )
+    }
+
+    fn cache_path(name: &str) -> Option<PathBuf> {
+        let dir = Self::cache_dir()?;
+        let safe_name = name.replace('/', "_").replace('@', "");
+        Some(dir.join(format!("{safe_name}.json")))
+    }
+
+    fn read_cached_metadata(name: &str) -> Option<serde_json::Value> {
+        let path = Self::cache_path(name)?;
+        if !path.exists() {
+            return None;
+        }
+        let metadata = std::fs::metadata(&path).ok()?;
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(elapsed) = modified.elapsed() {
+                if elapsed > CACHE_TTL {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+            }
+        }
+        let content = std::fs::read_to_string(path).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+        parsed.get("body").cloned()
+    }
+
+    fn write_cached_metadata(name: &str, body: &serde_json::Value) {
+        let path = match Self::cache_path(name) {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let cache = serde_json::json!({ "body": body });
+        if let Ok(content) = serde_json::to_string(&cache) {
+            let _ = std::fs::write(&path, content);
+        }
+    }
+
+    pub fn resolve(&self, name: &str) -> Result<String, SourceError> {
+        let parsed = self.fetch_metadata(name)?;
 
         // Prefer the `latest` dist-tag when present (matches npm behavior)
         if let Some(latest_tag) = parsed
@@ -65,14 +139,7 @@ impl RegistrySource {
         name: &str,
         constraint_str: &str,
     ) -> Result<String, SourceError> {
-        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
-        let url = format!("{}/{name}", self.registry_url);
-        let body = client
-            .get(&url)
-            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
-
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
+        let parsed = self.fetch_metadata(name)?;
 
         let constraint =
             Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
