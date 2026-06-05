@@ -1,23 +1,27 @@
-.PHONY: all build bundle test test-e2e test-all lint audit deny udeps ci clean install-hooks
+.PHONY: all build bundle test test-e2e test-fixtures test-all lint audit deny udeps ci clean install-hooks
 
-all: build build-sec
+all: build
 
 build:
 	@echo "  BUILD  ara"
 	@cd src && cargo build --quiet 2>&1
 
-bundle: build build-sec
+bundle: build
 	@scripts/bundle.sh
 
 test:
 	@echo "  TEST   ara"
 	@cd src && cargo test --quiet 2>&1
 
-test-e2e: build build-sec
+test-e2e: build
 	@echo "  TEST   e2e"
-	@tests/run.sh
+	@cd src && tests/run.sh
 
-test-all: test test test-e2e
+test-fixtures:
+	@echo "  TEST   fixtures"
+	@cd src && cargo test test_fixtures --quiet 2>&1
+
+test-all: test test-e2e test-fixtures
 	@echo "  ALL    tests passed"
 
 lint:
