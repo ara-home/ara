@@ -11,7 +11,7 @@ use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
 use crate::source::Source;
 use crate::store::cas::Store;
-use crate::types::{Constraint, SourceType, Version};
+use crate::types::{Constraint, PackageIdentity, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
@@ -52,6 +52,7 @@ fn source_type_from_str(s: &str) -> SourceType {
         "git" => SourceType::Git,
         "local" => SourceType::Local,
         "workspace" => SourceType::Workspace,
+        "url" => SourceType::Url,
         _ => SourceType::Npm,
     }
 }
@@ -90,6 +91,10 @@ fn create_source(
                 .as_deref()
                 .context("missing path for local source")?;
             Source::Local(crate::source::local::LocalSource::new(path.to_string()))
+        }
+        SourceType::Url => {
+            let url = dep.url.as_deref().context("missing url for url source")?;
+            Source::Url(crate::source::tarball::TarballSource::new(url.to_string()))
         }
         SourceType::Workspace => {
             let path = dep.path.as_deref().unwrap_or(".");
@@ -210,6 +215,488 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
+}
+
+pub(crate) fn cmd_install_specs(
+    specs: &[String],
+    save_dev: bool,
+    save_peer: bool,
+    save_optional: bool,
+    range: Option<&str>,
+    force: bool,
+    refresh: bool,
+    offline: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    // Read or bootstrap a minimal manifest
+    let mut m = match read_manifest(&cwd) {
+        Ok(m) => m,
+        Err(_) => {
+            let dir_name = cwd
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string());
+            println!("No manifest found. Creating ara.toml for {dir_name}.");
+            crate::manifest::types::Manifest {
+                project: crate::manifest::types::Project {
+                    name: dir_name,
+                    version: "0.1.0".to_string(),
+                },
+                deps: vec![],
+                workspace: None,
+                scripts: vec![],
+                security: None,
+                build: None,
+                package_json_extras: None,
+            }
+        }
+    };
+
+    println!(
+        "Installing {} package(s) into {} v{}",
+        specs.len(),
+        m.project.name,
+        m.project.version
+    );
+
+    let dep_kind = if save_peer {
+        Some("peer".to_string())
+    } else if save_dev {
+        Some("dev".to_string())
+    } else if save_optional {
+        Some("optional".to_string())
+    } else {
+        None
+    };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let store_base = PathBuf::from(&home).join(".ara").join("store");
+    let store = Store::new(store_base.clone());
+    store.ensure_dirs()?;
+
+    let node_modules = cwd.join("node_modules");
+    if let Err(e) = std::fs::create_dir_all(&node_modules) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e).context("failed to create node_modules directory");
+        }
+    }
+
+    let index_path = store_base.join("index.json");
+    let mut store_index: HashMap<String, String> = if index_path.exists() {
+        let idx_content = std::fs::read_to_string(&index_path)?;
+        serde_json::from_str(&idx_content).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    let mut pkg_entries: Vec<PackageEntry> = Vec::new();
+
+    for spec in specs {
+        let target = crate::source::url::parse_install_spec(spec)
+            .with_context(|| format!("failed to parse spec: {spec}"))?;
+
+        let mut meta = resolve_spec_meta(&target, range)?;
+
+        if m.deps.iter().any(|d| d.name == meta.name) {
+            println!("  {} already in manifest, skipping", meta.name);
+            continue;
+        }
+
+        // Compute version string and cache key (source-type aware)
+        let ver_str = match meta.source_type {
+            SourceType::Npm | SourceType::Registry => format!(
+                "{}.{}.{}",
+                meta.version_semver.major, meta.version_semver.minor, meta.version_semver.patch
+            ),
+            _ => meta.version.clone(),
+        };
+        let cache_key = format!("{}:{}@{}", meta.source_type, meta.name, ver_str);
+
+        // Fetch content — checking cache first
+        let (pkg_content, hash_str) = if force {
+            let content = fetch_meta_content(&meta)?;
+            let hash = store.put(&content)?;
+            store_index.insert(cache_key.clone(), hash.clone());
+            println!("  fetching {}@{} (forced)...", meta.name, ver_str);
+            (content, hash)
+        } else if let Some(cached_hash) = store_index.get(&cache_key) {
+            if store.contains(cached_hash) {
+                if let Some(content) = store.get(cached_hash)? {
+                    if refresh {
+                        println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
+                        let content = fetch_meta_content(&meta)?;
+                        let hash = store.put(&content)?;
+                        store_index.insert(cache_key, hash.clone());
+                        (content, hash)
+                    } else {
+                        println!("  using cached {}@{}", meta.name, ver_str);
+                        (content, cached_hash.clone())
+                    }
+                } else {
+                    store_index.remove(&cache_key);
+                    let content = fetch_meta_content(&meta)?;
+                    let hash = store.put(&content)?;
+                    store_index.insert(cache_key, hash.clone());
+                    (content, hash)
+                }
+            } else {
+                store_index.remove(&cache_key);
+                let content = fetch_meta_content(&meta)?;
+                let hash = store.put(&content)?;
+                store_index.insert(cache_key, hash.clone());
+                (content, hash)
+            }
+        } else if offline {
+            anyhow::bail!(
+                "{}@{} not found in cache (--offline mode)",
+                meta.name,
+                ver_str
+            );
+        } else {
+            let content = fetch_meta_content(&meta)?;
+            let hash = store.put(&content)?;
+            store_index.insert(cache_key, hash.clone());
+            println!("  fetching {}@{}...", meta.name, ver_str);
+            (content, hash)
+        };
+
+        // For tarball URLs, identity is embedded in the tarball — extract it now
+        if meta.source_type == SourceType::Url {
+            let (real_name, real_version) =
+                crate::source::tarball::identity_from_tarball(&pkg_content).unwrap_or_else(|_| {
+                    let fallback =
+                        crate::source::tarball::name_from_url(meta.url.as_deref().unwrap_or(""))
+                            .unwrap_or_else(|| "package".to_string());
+                    println!(
+                        "  warning: could not read package.json from tarball, using {fallback}"
+                    );
+                    (fallback, "0.0.0".to_string())
+                });
+            meta.name = real_name;
+            meta.version.clone_from(&real_version);
+            if let Ok(pv) = Version::parse(&real_version) {
+                meta.version_semver = pv;
+            }
+        }
+
+        let pkg_dir = node_modules.join(&meta.name);
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+        std::fs::create_dir_all(&pkg_dir)?;
+
+        if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
+            println!("  failed to extract {}: {}", meta.name, e);
+            continue;
+        }
+
+        let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
+            Ok(result) => {
+                if result.findings.is_empty() {
+                    print!("  ✓ {}@{} ({})", meta.name, ver_str, hash_str);
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(result.risk_level.to_string()),
+                        }),
+                    )
+                } else if non_interactive {
+                    let rl = result.risk_level;
+                    print!(
+                        "  ✓ {}@{} ({}) ⚠  {} finding(s) ({})",
+                        meta.name,
+                        ver_str,
+                        hash_str,
+                        result.findings.len(),
+                        rl
+                    );
+                    (
+                        true,
+                        Some(SecurityMeta {
+                            risk_level: Some(rl.to_string()),
+                        }),
+                    )
+                } else {
+                    match prompt_allow_package(&meta.name, &ver_str, &result.findings) {
+                        AllowDecision::Yes | AllowDecision::Sandbox => {
+                            println!("  ✓ {}@{} ({}) — allowed", meta.name, ver_str, hash_str);
+                            (
+                                true,
+                                Some(SecurityMeta {
+                                    risk_level: Some(result.risk_level.to_string()),
+                                }),
+                            )
+                        }
+                        AllowDecision::No => {
+                            let _ = std::fs::remove_dir_all(&pkg_dir);
+                            println!("  ✗ {}@{} ({}) — denied", meta.name, ver_str, hash_str);
+                            (false, None)
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                print!("  ✓ {}@{} ({})", meta.name, ver_str, hash_str);
+                (true, None)
+            }
+        };
+
+        if !allowed {
+            continue;
+        }
+
+        // Add to manifest
+        m.deps.push(crate::manifest::types::DependencyEntry {
+            name: meta.name.clone(),
+            source: meta.source.clone(),
+            kind: dep_kind.clone(),
+            version: Some(meta.version.clone()),
+            repo: meta.repo.clone(),
+            url: meta.url.clone(),
+            commit: meta.commit.clone(),
+            path: None,
+        });
+
+        pkg_entries.push(PackageEntry {
+            name: meta.name.clone(),
+            version: ver_str.clone(),
+            source: meta.source_type.to_string(),
+            package_hash: hash_str.clone(),
+            integrity: None,
+            signature: None,
+            repository: meta.repo.clone(),
+            commit: meta.commit.clone(),
+            dependencies: None,
+            security,
+            sbom: None,
+        });
+
+        println!();
+    }
+
+    // Save store index
+    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+
+    // Write updated ara.toml
+    let ara_toml_content = generate_ara_toml(&m);
+    std::fs::write(cwd.join("ara.toml"), &ara_toml_content).context("failed to write ara.toml")?;
+
+    println!("Updated ara.toml with {} dep(s)", m.deps.len());
+
+    if !pkg_entries.is_empty() {
+        write_lockfile(&cwd, &pkg_entries)?;
+    }
+
+    Ok(())
+}
+
+/// Resolved package metadata (without content).
+struct ResolvedMeta {
+    name: String,
+    version: String,
+    version_semver: Version,
+    source_type: SourceType,
+    source: String,
+    url: Option<String>,
+    repo: Option<String>,
+    commit: Option<String>,
+}
+
+/// Fetch content for a resolved meta, returning raw bytes.
+fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
+    match meta.source_type {
+        SourceType::Npm | SourceType::Registry => {
+            let registry_url = std::env::var("ARA_NPM_REGISTRY")
+                .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+            let reg = crate::source::registry::RegistrySource::new(registry_url);
+            let identity = PackageIdentity {
+                source: SourceType::Npm,
+                name: meta.name.clone(),
+                version: meta.version_semver.clone(),
+                content_hash: None,
+                requested_ref: None,
+            };
+            reg.fetch(&identity)
+                .with_context(|| format!("failed to fetch {}@{}", meta.name, meta.version))
+        }
+        SourceType::Github => {
+            let repo = meta.repo.as_deref().unwrap_or(&meta.name);
+            let src = crate::source::github::GithubSource::new(repo.to_string());
+            let identity = PackageIdentity {
+                source: SourceType::Github,
+                name: repo.to_string(),
+                version: meta.version_semver.clone(),
+                content_hash: None,
+                requested_ref: meta.commit.clone(),
+            };
+            src.fetch(&identity)
+                .with_context(|| format!("failed to fetch github:{repo}"))
+        }
+        SourceType::Git => {
+            let url = meta.url.as_deref().unwrap_or(&meta.name);
+            let commit_str = meta.commit.clone().unwrap_or_else(|| "HEAD".to_string());
+            let src = crate::source::git::GitSource::new(url.to_string(), commit_str.clone());
+            let identity = PackageIdentity {
+                source: SourceType::Git,
+                name: url.to_string(),
+                version: meta.version_semver.clone(),
+                content_hash: None,
+                requested_ref: Some(commit_str),
+            };
+            src.fetch(&identity)
+                .with_context(|| format!("failed to fetch git:{url}"))
+        }
+        SourceType::Url => {
+            let url = meta.url.as_deref().unwrap_or(&meta.name);
+            let src = crate::source::tarball::TarballSource::new(url.to_string());
+            let identity = PackageIdentity {
+                source: SourceType::Url,
+                name: url.to_string(),
+                version: Version::new(0, 0, 0),
+                content_hash: None,
+                requested_ref: None,
+            };
+            src.fetch(&identity)
+                .with_context(|| format!("failed to download {url}"))
+        }
+        _ => anyhow::bail!("unsupported source type: {}", meta.source_type),
+    }
+}
+
+fn resolve_npm_meta(
+    name: &str,
+    version: Option<&str>,
+    range: Option<&str>,
+) -> Result<ResolvedMeta> {
+    let registry_url = std::env::var("ARA_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+
+    let reg = crate::source::registry::RegistrySource::new(registry_url);
+
+    let (resolved_ver_str, manifest_ver) = if let Some(v) = version {
+        let trimmed = v
+            .trim_start_matches('^')
+            .trim_start_matches('~')
+            .trim_start_matches('>')
+            .trim_start_matches('<')
+            .trim_start_matches('=');
+        let is_exact = v == trimmed;
+        if is_exact {
+            Version::parse(v).with_context(|| format!("invalid version: {v}"))?;
+            (v.to_string(), v.to_string())
+        } else {
+            let concrete = reg
+                .resolve(name)
+                .with_context(|| format!("failed to resolve {name} for range {v}"))?;
+            (concrete, v.to_string())
+        }
+    } else {
+        let concrete = reg
+            .resolve(name)
+            .with_context(|| format!("failed to resolve {name}"))?;
+        let manifest = apply_range(&concrete, range);
+        (concrete, manifest)
+    };
+
+    let parsed_ver = Version::parse(&resolved_ver_str)
+        .with_context(|| format!("invalid version from registry: {resolved_ver_str}"))?;
+
+    Ok(ResolvedMeta {
+        name: name.to_string(),
+        version: manifest_ver,
+        version_semver: parsed_ver,
+        source_type: SourceType::Npm,
+        source: "npm".to_string(),
+        url: None,
+        repo: None,
+        commit: None,
+    })
+}
+
+fn resolve_github_meta(repo: &str, commit: Option<&str>) -> Result<ResolvedMeta> {
+    let ver_str = commit.unwrap_or("HEAD").to_string();
+    Ok(ResolvedMeta {
+        name: repo.to_string(),
+        version: ver_str,
+        version_semver: Version::new(0, 0, 0),
+        source_type: SourceType::Github,
+        source: "github".to_string(),
+        url: None,
+        repo: Some(repo.to_string()),
+        commit: commit.map(|c| c.to_string()),
+    })
+}
+
+fn resolve_git_meta(url: &str, commit: Option<&str>) -> Result<ResolvedMeta> {
+    let commit_str = commit.unwrap_or("HEAD").to_string();
+    let name = derive_name_from_git_url(url)
+        .unwrap_or_else(|| url.rsplit('/').next().unwrap_or(url).to_string());
+    Ok(ResolvedMeta {
+        name,
+        version: commit_str.clone(),
+        version_semver: Version::new(0, 0, 0),
+        source_type: SourceType::Git,
+        source: "git".to_string(),
+        url: Some(url.to_string()),
+        repo: None,
+        commit: Some(commit_str),
+    })
+}
+
+fn resolve_tarball_meta(url: &str) -> Result<ResolvedMeta> {
+    // Tarball identity is unknown until download; name/version filled after fetch.
+    Ok(ResolvedMeta {
+        name: String::new(),
+        version: String::new(),
+        version_semver: Version::new(0, 0, 0),
+        source_type: SourceType::Url,
+        source: "url".to_string(),
+        url: Some(url.to_string()),
+        repo: None,
+        commit: None,
+    })
+}
+
+fn resolve_spec_meta(
+    target: &crate::source::url::InstallTarget,
+    range: Option<&str>,
+) -> Result<ResolvedMeta> {
+    match target {
+        crate::source::url::InstallTarget::Npm { name, version } => {
+            resolve_npm_meta(name, version.as_deref(), range)
+        }
+        crate::source::url::InstallTarget::Github { repo, commit } => {
+            resolve_github_meta(repo, commit.as_deref())
+        }
+        crate::source::url::InstallTarget::Git { url, commit } => {
+            resolve_git_meta(url, commit.as_deref())
+        }
+        crate::source::url::InstallTarget::Tarball { url } => resolve_tarball_meta(url),
+    }
+}
+
+fn apply_range(version: &str, range: Option<&str>) -> String {
+    match range {
+        Some("caret") => format!("^{version}"),
+        Some("patch") => format!("~{version}"),
+        _ => version.to_string(),
+    }
+}
+
+fn derive_name_from_git_url(url: &str) -> Option<String> {
+    // https://github.com/user/repo.git → "repo"
+    // git@github.com:user/repo.git → "repo"
+    // https://bitbucket.org/user/repo → "repo"
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let without_git = without_fragment
+        .strip_suffix(".git")
+        .unwrap_or(without_fragment);
+    let name = without_git.rsplit('/').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn toml_escape(s: &str) -> String {
@@ -616,6 +1103,7 @@ fn fetch_and_store(
         name: node.name.clone(),
         version: node.version.clone(),
         content_hash: None,
+        requested_ref: None,
     };
 
     let pkg_content = match src.fetch(&identity) {

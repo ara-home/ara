@@ -18,6 +18,29 @@ pub struct Cli {
 pub enum Commands {
     /// Install project dependencies
     Install {
+        /// Package specifiers to install directly (name, name@version, git URL, etc.)
+        deps: Vec<String>,
+        /// Save as dev dependency
+        #[arg(long)]
+        save_dev: bool,
+        /// Save as peer dependency
+        #[arg(long)]
+        save_peer: bool,
+        /// Save as optional dependency
+        #[arg(long)]
+        save_optional: bool,
+        /// Version range strategy: "exact" (default), "caret" (^), or "patch" (~)
+        #[arg(long)]
+        range: Option<String>,
+        /// Force re-download even if cached
+        #[arg(long)]
+        force: bool,
+        /// Bypass cache for mutable references (branches, tags)
+        #[arg(long)]
+        refresh: bool,
+        /// Fail if package is not in cache
+        #[arg(long)]
+        offline: bool,
         #[arg(long)]
         non_interactive: bool,
     },
@@ -50,7 +73,33 @@ pub enum Commands {
 impl Cli {
     pub fn run(&self) -> Result<()> {
         match &self.command {
-            Commands::Install { non_interactive } => install::cmd_install(*non_interactive),
+            Commands::Install {
+                deps,
+                save_dev,
+                save_peer,
+                save_optional,
+                range,
+                force,
+                refresh,
+                offline,
+                non_interactive,
+            } => {
+                if !deps.is_empty() {
+                    install::cmd_install_specs(
+                        deps,
+                        *save_dev,
+                        *save_peer,
+                        *save_optional,
+                        range.as_deref(),
+                        *force,
+                        *refresh,
+                        *offline,
+                        *non_interactive,
+                    )
+                } else {
+                    install::cmd_install(*non_interactive)
+                }
+            }
             Commands::Run { script, profile } => run::cmd_run(script, profile),
             Commands::Analyze { path } => analyze::cmd_analyze(path),
             Commands::Audit { path } => analyze::cmd_audit(path),

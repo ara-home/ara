@@ -19,22 +19,62 @@ impl GitSource {
         Ok(self.commit.clone())
     }
 
-    pub fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let tmp_dir = tempfile::Builder::new()
             .prefix("ara-git-")
             .tempdir()
             .map_err(|e: std::io::Error| SourceError::GitError(e.to_string()))?;
         let tmp_path = tmp_dir.path().join("repo");
 
-        let status = Command::new("git")
-            .args(["clone", "--depth", "1", &self.url])
-            .arg(&tmp_path)
-            .current_dir("/tmp")
-            .status()
-            .map_err(|e| SourceError::GitError(format!("failed to run git: {e}")))?;
+        let ref_str = identity.requested_ref.as_deref().unwrap_or(&self.commit);
 
-        if !status.success() {
-            return Err(SourceError::GitError("git clone failed".to_string()));
+        if ref_str == "HEAD" {
+            // Shallow clone the default branch
+            let status = Command::new("git")
+                .args(["clone", "--depth", "1", &self.url])
+                .arg(&tmp_path)
+                .current_dir("/tmp")
+                .status()
+                .map_err(|e| SourceError::GitError(format!("failed to run git: {e}")))?;
+            if !status.success() {
+                return Err(SourceError::GitError("git clone failed".to_string()));
+            }
+        } else {
+            // Fetch a specific ref (commit, tag, or branch) with depth 1
+            let init = Command::new("git")
+                .args(["init"])
+                .arg(&tmp_path)
+                .status()
+                .map_err(|e| SourceError::GitError(format!("failed to run git init: {e}")))?;
+            if !init.success() {
+                return Err(SourceError::GitError("git init failed".to_string()));
+            }
+            let add_remote = Command::new("git")
+                .args(["remote", "add", "origin", &self.url])
+                .current_dir(&tmp_path)
+                .status()
+                .map_err(|e| SourceError::GitError(format!("failed to add remote: {e}")))?;
+            if !add_remote.success() {
+                return Err(SourceError::GitError("git remote add failed".to_string()));
+            }
+            let fetch = Command::new("git")
+                .args(["fetch", "--depth", "1", "origin", ref_str])
+                .current_dir(&tmp_path)
+                .status()
+                .map_err(|e| SourceError::GitError(format!("failed to fetch: {e}")))?;
+            if !fetch.success() {
+                return Err(SourceError::GitError(
+                    "git fetch ref failed — ref may not exist".to_string(),
+                ));
+            }
+            let checkout = Command::new("git")
+                .args(["checkout", "FETCH_HEAD"])
+                .current_dir(&tmp_path)
+                .status()
+                .map_err(|e| SourceError::GitError(format!("failed to checkout: {e}")))?;
+            if !checkout.success() {
+                return Err(SourceError::GitError("git checkout ref failed".to_string()));
+            }
         }
 
         let output = Command::new("tar")
@@ -100,6 +140,7 @@ mod tests {
             name: "test-repo".to_string(),
             version: crate::types::Version::parse("0.1.0").unwrap(),
             content_hash: None,
+            requested_ref: None,
         };
 
         let result = src.fetch(&identity).unwrap();
