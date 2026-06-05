@@ -1,5 +1,5 @@
 use crate::source::SourceError;
-use crate::types::{PackageIdentity, Version};
+use crate::types::{Constraint, PackageIdentity, Version};
 use crate::util::http::HttpClient;
 
 pub struct RegistrySource {
@@ -56,6 +56,47 @@ impl RegistrySource {
         }
 
         latest.ok_or(SourceError::VersionNotFound)
+    }
+
+    /// Resolve the best version matching a constraint string (e.g., `^0.5.15`).
+    /// Returns the highest published version that satisfies the constraint.
+    pub fn resolve_matching(
+        &self,
+        name: &str,
+        constraint_str: &str,
+    ) -> Result<String, SourceError> {
+        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let url = format!("{}/{name}", self.registry_url);
+        let body = client
+            .get(&url)
+            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
+
+        let constraint =
+            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
+
+        let versions = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .ok_or(SourceError::PackageNotFound)?;
+
+        let mut best: Option<Version> = None;
+        for (ver_str, _) in versions {
+            if let Ok(ver) = Version::parse(ver_str) {
+                if constraint.satisfied_by(&ver) {
+                    match &best {
+                        Some(current) if ver > *current => best = Some(ver),
+                        None => best = Some(ver),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        best.map(|v| v.to_string())
+            .ok_or(SourceError::VersionNotFound)
     }
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {

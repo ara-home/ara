@@ -338,15 +338,38 @@ fn install_transitive_deps(
     while installed_any {
         installed_any = false;
 
-        let dirs: Vec<PathBuf> = std::fs::read_dir(node_modules)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().ok().is_some_and(|t| t.is_dir()))
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|s| s.to_str()) != Some(".bin"))
-            .collect();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(node_modules) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(ftype) = entry.file_type() else {
+                    continue;
+                };
+                if !ftype.is_dir() {
+                    continue;
+                }
+                let fname = match path.file_name().and_then(|s| s.to_str()) {
+                    Some(f) => f.to_string(),
+                    None => continue,
+                };
+                if fname == ".bin" {
+                    continue;
+                }
+                // Scoped package directory — add its subdirectories
+                if fname.starts_with('@') {
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub in sub_entries.flatten() {
+                            let sub_path = sub.path();
+                            if sub.file_type().ok().is_some_and(|t| t.is_dir()) {
+                                dirs.push(sub_path);
+                            }
+                        }
+                    }
+                } else {
+                    dirs.push(path);
+                }
+            }
+        }
 
         for pkg_dir in &dirs {
             let pkg_json = pkg_dir.join("package.json");
@@ -378,12 +401,15 @@ fn install_transitive_deps(
                 println!("  installing transitive dep: {}@{}", dep_name, dep_ver_str);
 
                 let reg = crate::source::registry::RegistrySource::new(registry_url.clone());
-                let resolved_ver = match reg.resolve(dep_name) {
+                let resolved_ver = match reg.resolve_matching(dep_name, dep_ver_str) {
                     Ok(v) => v,
-                    Err(e) => {
-                        println!("    warning: cannot resolve {}: {}", dep_name, e);
-                        continue;
-                    }
+                    Err(_) => match reg.resolve(dep_name) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!("    warning: cannot resolve {}: {}", dep_name, e);
+                            continue;
+                        }
+                    },
                 };
                 let parsed_ver = match Version::parse(&resolved_ver) {
                     Ok(v) => v,
