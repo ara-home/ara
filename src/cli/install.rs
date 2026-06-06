@@ -436,10 +436,9 @@ fn install_transitive_deps(
                 .par_iter()
                 .filter_map(|name| {
                     let exact_ver = resolution.get(name)?;
-                    let (deps, peers, _optional) =
+                    let (deps, _peers, _optional) =
                         reg.get_deps_for_version(name, exact_ver).ok()?;
-                    let all: Vec<(String, String)> =
-                        deps.into_iter().chain(peers.into_iter()).collect();
+                    let all: Vec<(String, String)> = deps.into_iter().collect();
                     if all.is_empty() {
                         None
                     } else {
@@ -482,6 +481,8 @@ fn install_transitive_deps(
                 pending.push(name);
             }
         }
+
+        eprintln!("  resolved {} packages...", resolution.len());
     }
 
     // =============================================
