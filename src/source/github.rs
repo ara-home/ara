@@ -13,11 +13,11 @@ impl GithubSource {
     }
 
     #[allow(clippy::unnecessary_wraps)]
-    pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
+    pub async fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.repo.clone())
     }
 
-    pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub async fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let ref_str = identity.requested_ref.as_deref().unwrap_or("HEAD");
         let url = format!(
@@ -26,6 +26,7 @@ impl GithubSource {
         );
         let body = client
             .get(&url)
+            .await
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
     }
@@ -36,10 +37,10 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    #[test]
-    fn test_resolve_returns_repo() {
+    #[tokio::test]
+    async fn test_resolve_returns_repo() {
         let src = GithubSource::new("owner/repo".to_string());
-        assert_eq!(src.resolve("any").unwrap(), "owner/repo");
+        assert_eq!(src.resolve("any").await.unwrap(), "owner/repo");
     }
 
     #[test]

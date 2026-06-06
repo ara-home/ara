@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -81,7 +84,7 @@ fn create_source(
             let url = dep.url.as_deref().unwrap_or(&default_url);
             Source::Registry(crate::source::registry::RegistrySource::new(
                 url.to_string(),
-            ))
+            )?)
         }
         SourceType::Github => {
             let repo = dep
@@ -203,16 +206,43 @@ fn expand_workspace_members(
     entries
 }
 
+struct TarballEntry {
+    path: std::path::PathBuf,
+    entry_type: tar::EntryType,
+    data: Vec<u8>,
+    mode: u32,
+}
+
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
+
+    let mut raw_entries: Vec<TarballEntry> = Vec::new();
     for entry in archive
         .entries()
         .context("failed to read tarball entries")?
     {
         let mut entry = entry.context("failed to read tarball entry")?;
-        let path = entry.path().context("failed to read entry path")?;
-        let stripped = path.strip_prefix("package").unwrap_or(&path);
+        let path = entry
+            .path()
+            .context("failed to read entry path")?
+            .into_owned();
+        let entry_type = entry.header().entry_type();
+        let mode = entry.header().mode()?;
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        raw_entries.push(TarballEntry {
+            path,
+            entry_type,
+            data,
+            mode,
+        });
+    }
+
+    let prefix = detect_tarball_prefix(&raw_entries);
+
+    for entry in &raw_entries {
+        let stripped = entry.path.strip_prefix(&prefix).unwrap_or(&entry.path);
         if stripped.as_os_str().is_empty() {
             continue;
         }
@@ -220,17 +250,635 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        entry.unpack(target)?;
+        if entry.entry_type == tar::EntryType::Directory {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            std::fs::write(&target, &entry.data)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(entry.mode))?;
+            }
+        }
     }
     Ok(())
 }
 
-pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
-    cmd_install_in(&cwd, non_interactive)
+fn detect_tarball_prefix(entries: &[TarballEntry]) -> std::path::PathBuf {
+    if entries.is_empty() {
+        return std::path::PathBuf::new();
+    }
+
+    let first_comp = entries.first().and_then(|e| e.path.components().next());
+
+    let common = first_comp.filter(|comp| {
+        entries.iter().all(|e| {
+            let mut comps = e.path.components();
+            let first = comps.next();
+            // It must match the first component.
+            // If it has NO other components (i.e. it is the directory itself), that's fine.
+            first == Some(*comp)
+        })
+    });
+
+    match common {
+        Some(comp) => {
+            // Check if there are actually files inside this directory.
+            let has_files = entries.iter().any(|e| e.path.components().count() > 1);
+            if has_files {
+                std::path::PathBuf::from(comp.as_os_str())
+            } else {
+                std::path::PathBuf::new()
+            }
+        }
+        None => std::path::PathBuf::new(),
+    }
 }
 
-pub(crate) fn cmd_install_specs(
+/// Create symlinks in `node_modules/.bin/` for the package's `bin` entries.
+fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Result<()> {
+    let pkg_json_path = pkg_dir.join("package.json");
+    if !pkg_json_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&pkg_json_path)
+        .context("failed to read package.json for bin links")?;
+    let pkg: serde_json::Value =
+        serde_json::from_str(&content).context("failed to parse package.json for bin links")?;
+
+    let bin_entries: Vec<(String, String)> = match pkg.get("bin") {
+        Some(serde_json::Value::String(cmd)) => {
+            let unscoped_name = pkg_name
+                .split('/')
+                .next_back()
+                .unwrap_or(pkg_name)
+                .to_string();
+            vec![(unscoped_name, cmd.clone())]
+        }
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .filter(|(_, v)| !v.is_empty())
+            .collect(),
+        _ => return Ok(()),
+    };
+
+    if bin_entries.is_empty() {
+        return Ok(());
+    }
+
+    let bin_dir = node_modules.join(".bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    for (name, rel_path) in &bin_entries {
+        let link = bin_dir.join(name);
+        let target = format!("../{}/{}", pkg_name, rel_path);
+        let actual_file = pkg_dir.join(rel_path);
+
+        #[cfg(unix)]
+        if let Ok(metadata) = std::fs::metadata(&actual_file) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            if let Err(e) = std::fs::set_permissions(&actual_file, perms) {
+                eprintln!(
+                    "  warning: failed to set executable permissions on {actual_file:?}: {e}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&link);
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)
+            .with_context(|| format!("failed to create symlink {link:?} -> {target}"))?;
+
+        #[cfg(not(unix))]
+        std::fs::hard_link(&actual_file, &link)
+            .with_context(|| format!("failed to link {link:?}"))?;
+    }
+
+    Ok(())
+}
+
+/// Scan `node_modules/<pkg>/package.json` for each installed package and
+/// recursively install any missing transitive dependencies.
+fn collect_installed_names(node_modules: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = std::fs::read_dir(node_modules) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ftype) = entry.file_type() else {
+            continue;
+        };
+        if !ftype.is_dir() {
+            continue;
+        }
+        let fname = match path.file_name().and_then(|s| s.to_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+        if fname == ".bin" {
+            continue;
+        }
+        if fname.starts_with('@') {
+            let Ok(sub_entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for sub in sub_entries.flatten() {
+                let sub_path = sub.path();
+                if sub.file_type().ok().is_some_and(|t| t.is_dir()) {
+                    if let Some(sub_name) = sub_path.file_name().and_then(|s| s.to_str()) {
+                        names.push(format!("{}/{}", fname, sub_name));
+                    }
+                }
+            }
+        } else {
+            names.push(fname);
+        }
+    }
+    names
+}
+
+/// Extract and sort all version strings from package metadata.
+/// Compact extracted metadata: only versions + dependency maps,
+/// avoids storing the full npm registry response (30MB+ for next.js).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PackageMeta {
+    versions: Vec<String>,
+    deps: HashMap<String, HashMap<String, String>>,
+}
+
+fn registry_cache_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".ara")
+            .join("cache")
+            .join("registry"),
+    )
+}
+
+fn read_package_meta(name: &str) -> Option<PackageMeta> {
+    let dir = registry_cache_dir()?;
+    let safe_name = name.replace('/', "_").replace('@', "");
+    let path = dir.join(format!("{safe_name}.json"));
+    if !path.exists() {
+        return None;
+    }
+    let metadata = std::fs::metadata(&path).ok()?;
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(elapsed) = modified.elapsed() {
+            if elapsed > Duration::from_secs(604800) {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+        }
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    serde_json::from_reader(reader).ok()
+}
+
+fn write_package_meta(name: &str, meta: &PackageMeta) {
+    let dir = match registry_cache_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let safe_name = name.replace('/', "_").replace('@', "");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("  warning: failed to create registry cache dir: {e}");
+        return;
+    }
+    let path = dir.join(format!("{safe_name}.json"));
+    let file = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let writer = std::io::BufWriter::new(file);
+    let _ = serde_json::to_writer(writer, meta);
+}
+
+/// Extract sorted versions + dependency map from full npm metadata JSON.
+fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
+    let versions_map = meta["versions"].as_object().cloned().unwrap_or_default();
+    let mut versions: Vec<String> = versions_map.keys().cloned().collect();
+    versions.sort_by(|a, b| {
+        let va = Version::parse(a);
+        let vb = Version::parse(b);
+        match (va, vb) {
+            (Ok(va), Ok(vb)) => va.cmp(&vb),
+            _ => a.cmp(b),
+        }
+    });
+    let mut deps: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (ver_str, ver_data) in versions_map {
+        let mut deps_map = HashMap::new();
+        if let Some(dep_map) = ver_data["dependencies"].as_object() {
+            for (k, v) in dep_map {
+                if let Some(s) = v.as_str() {
+                    deps_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(opt_map) = ver_data["optionalDependencies"].as_object() {
+            for (k, v) in opt_map {
+                if let Some(s) = v.as_str() {
+                    deps_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if !deps_map.is_empty() {
+            deps.insert(ver_str.clone(), deps_map);
+        }
+    }
+    PackageMeta { versions, deps }
+}
+
+async fn install_transitive_deps(
+    node_modules: &Path,
+    store: &Store,
+    store_index: &Arc<Mutex<HashMap<String, String>>>,
+    pkg_entries: &mut Vec<PackageEntry>,
+    initial_packages: &[String],
+) -> Result<()> {
+    let registry_url = std::env::var("ARA_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+    let reg = crate::source::registry::RegistrySource::new(registry_url)?;
+
+    // Pre-populate resolution from packages already known to be installed
+    let mut resolution: HashMap<String, String> = HashMap::new();
+    for entry in &*pkg_entries {
+        resolution.insert(entry.name.clone(), entry.version.clone());
+    }
+
+    // Seed the queue: initial packages + pre-existing node_modules
+    // These go into pending so their deps can be scanned from metadata.
+    let existing = collect_installed_names(node_modules);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pending: Vec<String> = initial_packages
+        .iter()
+        .chain(existing.iter())
+        .filter(|n| !n.is_empty() && seen.insert(n.to_string()))
+        .cloned()
+        .collect();
+
+    // Uses compact PackageMeta (versions + deps only) instead of storing
+    // the full npm registry response (30MB+ for next.js).
+    let t_resolution = Instant::now();
+    let mut level_count = 0u32;
+    let mut meta_cache: HashMap<String, PackageMeta> = HashMap::new();
+    let mut t_fetch = Duration::ZERO;
+    let mut t_resolve = Duration::ZERO;
+    while !pending.is_empty() {
+        level_count += 1;
+        let batch: Vec<String> = std::mem::take(&mut pending);
+
+        let batch_uncached: Vec<String> = batch
+            .iter()
+            .filter(|n| !meta_cache.contains_key(*n))
+            .cloned()
+            .collect();
+        if !batch_uncached.is_empty() {
+            let t0 = Instant::now();
+            let mut tasks = Vec::new();
+            for name in batch_uncached {
+                let name = name.clone();
+                let reg = reg.clone();
+                let exact_ver_exists = resolution.contains_key(&name);
+                tasks.push(tokio::spawn(async move {
+                    if !exact_ver_exists {
+                        return None;
+                    }
+                    if let Some(pm) = tokio::task::spawn_blocking({
+                        let n = name.clone();
+                        move || read_package_meta(&n)
+                    })
+                    .await
+                    .ok()?
+                    {
+                        return Some((name, pm));
+                    }
+                    if let Ok(meta) = reg.fetch_metadata(&name).await {
+                        let pm = extract_package_meta(&meta);
+                        let _ = tokio::task::spawn_blocking({
+                            let n = name.clone();
+                            let p = pm.clone();
+                            move || write_package_meta(&n, &p)
+                        })
+                        .await;
+                        return Some((name, pm));
+                    }
+                    None
+                }));
+            }
+            let fetched: Vec<(String, PackageMeta)> = futures::future::join_all(tasks)
+                .await
+                .into_iter()
+                .filter_map(|x| x.ok().flatten())
+                .collect();
+            t_fetch += t0.elapsed();
+            for (name, pm) in fetched {
+                meta_cache.insert(name, pm);
+            }
+        }
+
+        let dep_lists: Vec<Vec<(String, String)>> = batch
+            .iter()
+            .filter_map(|name| {
+                let exact_ver = resolution.get(name)?;
+                let pm = meta_cache.get(name)?;
+                let deps = pm.deps.get(exact_ver).cloned().unwrap_or_default();
+                let all: Vec<(String, String)> = deps.into_iter().collect();
+                if all.is_empty() {
+                    None
+                } else {
+                    Some(all)
+                }
+            })
+            .collect();
+
+        let mut seen_dep: HashSet<String> = HashSet::new();
+        let unique_deps: Vec<(String, String)> = dep_lists
+            .iter()
+            .flatten()
+            .filter(|(name, _)| seen_dep.insert(name.clone()))
+            .filter(|(name, _)| {
+                !resolution.contains_key(name.as_str())
+                    && !node_modules.join(name.as_str()).exists()
+            })
+            .cloned()
+            .collect();
+
+        let dep_uncached: Vec<String> = unique_deps
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|n| !meta_cache.contains_key(n))
+            .collect();
+        if !dep_uncached.is_empty() {
+            let t0 = Instant::now();
+            let mut tasks = Vec::new();
+            for name in dep_uncached {
+                let name = name.clone();
+                let reg = reg.clone();
+                tasks.push(tokio::spawn(async move {
+                    if let Some(pm) = tokio::task::spawn_blocking({
+                        let n = name.clone();
+                        move || read_package_meta(&n)
+                    })
+                    .await
+                    .ok()?
+                    {
+                        return Some((name, pm));
+                    }
+                    if let Ok(meta) = reg.fetch_metadata(&name).await {
+                        let pm = extract_package_meta(&meta);
+                        let _ = tokio::task::spawn_blocking({
+                            let n = name.clone();
+                            let p = pm.clone();
+                            move || write_package_meta(&n, &p)
+                        })
+                        .await;
+                        return Some((name, pm));
+                    }
+                    None
+                }));
+            }
+            let fetched: Vec<(String, PackageMeta)> = futures::future::join_all(tasks)
+                .await
+                .into_iter()
+                .filter_map(|x| x.ok().flatten())
+                .collect();
+            t_fetch += t0.elapsed();
+            for (name, pm) in fetched {
+                meta_cache.insert(name, pm);
+            }
+        }
+
+        let t1 = Instant::now();
+        let discovered: Vec<(String, String)> = unique_deps
+            .iter()
+            .filter_map(|(dep_name, dep_range)| {
+                let pm = meta_cache.get(dep_name)?;
+                let constraint = Constraint::parse(dep_range).ok()?;
+                // Versions are sorted ascending, find highest matching
+                let best = pm
+                    .versions
+                    .iter()
+                    .rev()
+                    .filter_map(|v| {
+                        Version::parse(v)
+                            .ok()
+                            .filter(|pv| constraint.satisfied_by(pv))
+                    })
+                    .next()?;
+                Some((dep_name.clone(), best.to_string()))
+            })
+            .collect();
+        t_resolve += t1.elapsed();
+
+        for (name, ver) in discovered {
+            if seen.insert(name.clone()) {
+                resolution.insert(name.clone(), ver);
+                pending.push(name);
+            }
+        }
+
+        eprintln!("  resolved {} packages...", resolution.len());
+    }
+    eprintln!(
+        "  [profile] phase 3a resolution ({} levels, {} pkgs): {:?} (fetch {:.3}s, resolve {:.3}s)",
+        level_count,
+        resolution.len(),
+        t_resolution.elapsed(),
+        t_fetch.as_secs_f64(),
+        t_resolve.as_secs_f64(),
+    );
+
+    // Download → extract → bin links (I/O pool, 32 threads)
+    let t_dle = Instant::now();
+    let cache_hits = Arc::new(AtomicU32::new(0));
+    let total_resolve = resolution.len();
+    let (tx, rx) = std::sync::mpsc::channel::<Option<(String, String, String)>>();
+    let idx_store = Arc::clone(store_index);
+    let nm = node_modules;
+    let cache_hits_ref = Arc::clone(&cache_hits);
+    let mut tasks = Vec::new();
+    for (dep_name, exact_ver) in &resolution {
+        let dep_dir = nm.join(dep_name);
+        if dep_dir.exists() {
+            continue;
+        }
+        let parsed_ver = match Version::parse(exact_ver) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let identity = PackageIdentity {
+            source: SourceType::Npm,
+            name: dep_name.clone(),
+            version: parsed_ver.clone(),
+            content_hash: None,
+            requested_ref: None,
+        };
+        let short_ver = format!(
+            "{}.{}.{}",
+            parsed_ver.major, parsed_ver.minor, parsed_ver.patch
+        );
+        let cache_key = format!("npm:{}@{}", dep_name, short_ver);
+        let dep_name = dep_name.clone();
+        let tx = tx.clone();
+        let idx = Arc::clone(&idx_store);
+        let ch = Arc::clone(&cache_hits_ref);
+        let reg_ref = reg.clone();
+        let store_ref = store.clone();
+        let nm = nm.to_path_buf();
+
+        tasks.push(tokio::spawn(async move {
+            let cache_lookup = {
+                let guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                guard.get(&cache_key).cloned()
+            };
+            let result = if let Some(cached_hash) = cache_lookup {
+                if store_ref.contains(&cached_hash) {
+                    ch.fetch_add(1, Ordering::Relaxed);
+                    cached_hash
+                } else {
+                    {
+                        let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.remove(&cache_key);
+                    }
+                    match reg_ref.fetch(&identity).await {
+                        Ok(content) => match tokio::task::spawn_blocking({
+                            let s = store_ref.clone();
+                            let c = content;
+                            move || s.put(&c)
+                        })
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        {
+                            Some(h) => {
+                                let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.insert(cache_key.clone(), h.clone());
+                                h
+                            }
+                            None => {
+                                eprintln!("    warning: failed to store {}", dep_name);
+                                return;
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                            return;
+                        }
+                    }
+                }
+            } else {
+                match reg_ref.fetch(&identity).await {
+                    Ok(content) => match tokio::task::spawn_blocking({
+                        let s = store_ref.clone();
+                        let c = content;
+                        move || s.put(&c)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    {
+                        Some(h) => {
+                            let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.insert(cache_key.clone(), h.clone());
+                            h
+                        }
+                        None => {
+                            eprintln!("    warning: failed to store {}", dep_name);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                        return;
+                    }
+                }
+            };
+
+            let dep_dir_clone = dep_dir.clone();
+            let store_ref_clone = store_ref.clone();
+            let result_clone = result.clone();
+            let extraction = tokio::task::spawn_blocking(move || {
+                extract_package_cached(&store_ref_clone, &result_clone, &dep_dir_clone)
+            })
+            .await;
+
+            match extraction {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!("    failed to extract {}: {}", dep_name, e);
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("    failed to extract {} (task panic): {}", dep_name, e);
+                    return;
+                }
+            }
+            if let Err(e) = install_bin_links(&nm, dep_name.as_str(), &dep_dir) {
+                eprintln!(
+                    "    warning: failed to create bin links for {}: {}",
+                    dep_name, e
+                );
+            }
+            tx.send(Some((dep_name, short_ver, result))).ok();
+        }));
+    }
+    drop(tx);
+    futures::future::join_all(tasks).await;
+    let mut results: Vec<(String, String, String)> = Vec::new();
+    let mut last_progress = 0usize;
+    for item in rx.iter() {
+        if let Some(entry) = item {
+            results.push(entry);
+        }
+        let done = results.len();
+        let remaining = total_resolve.saturating_sub(done);
+        if done - last_progress >= 20 || remaining == 0 {
+            eprintln!("  progress: {done}/{total_resolve}, {remaining} remaining");
+            last_progress = done;
+        }
+    }
+    let fresh = total_resolve.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
+    eprintln!(
+        "  [profile] phase 3b download+extract: {:?} (hits: {}, fresh: {})",
+        t_dle.elapsed(),
+        cache_hits.load(Ordering::Relaxed),
+        fresh,
+    );
+
+    for (dep_name, short_ver, hash_str) in &results {
+        pkg_entries.push(PackageEntry {
+            name: dep_name.clone(),
+            version: short_ver.clone(),
+            source: "npm".to_string(),
+            package_hash: hash_str.clone(),
+            integrity: None,
+            signature: None,
+            repository: None,
+            commit: None,
+            dependencies: None,
+            security: None,
+            sbom: None,
+        });
+    }
+
+    Ok(())
+}
+pub(crate) async fn cmd_install(non_interactive: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    cmd_install_in(&cwd, non_interactive).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cmd_install_specs(
     specs: &[String],
     save_dev: bool,
     save_peer: bool,
@@ -297,12 +945,13 @@ pub(crate) fn cmd_install_specs(
     }
 
     let index_path = store_base.join("index.json");
-    let mut store_index: HashMap<String, String> = if index_path.exists() {
+    let store_index: HashMap<String, String> = if index_path.exists() {
         let idx_content = std::fs::read_to_string(&index_path)?;
         serde_json::from_str(&idx_content).unwrap_or_default()
     } else {
         HashMap::new()
     };
+    let store_index = Arc::new(Mutex::new(store_index));
 
     // Seed pkg_entries from existing lockfile so we don't lose prior entries
     let lock_path = cwd.join("ara.lock");
@@ -317,20 +966,19 @@ pub(crate) fn cmd_install_specs(
         Vec::new()
     };
 
+    let mut installed_names: Vec<String> = Vec::new();
     for spec in specs {
         let target = crate::source::url::parse_install_spec(spec)
             .with_context(|| format!("failed to parse spec: {spec}"))?;
 
-        let mut meta = resolve_spec_meta(&target, range)?;
+        let mut meta = resolve_spec_meta(&target, range).await?;
 
-        if m.deps.iter().any(|d| d.name == meta.name) {
-            println!("  {} already in manifest, skipping", meta.name);
-            continue;
+        if let Some(pos) = m.deps.iter().position(|d| d.name == meta.name) {
+            m.deps.remove(pos);
         }
 
-        if pkg_entries.iter().any(|e| e.name == meta.name) {
-            println!("  {} already in lockfile, skipping", meta.name);
-            continue;
+        if let Some(pos) = pkg_entries.iter().position(|e| e.name == meta.name) {
+            pkg_entries.remove(pos);
         }
 
         // Compute version string and cache key (source-type aware)
@@ -345,50 +993,83 @@ pub(crate) fn cmd_install_specs(
 
         // Fetch content — checking cache first
         let (pkg_content, hash_str) = if force {
-            let content = fetch_meta_content(&meta)?;
+            let content = fetch_meta_content(&meta).await?;
             let hash = store.put(&content)?;
-            store_index.insert(cache_key.clone(), hash.clone());
+            {
+                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.insert(cache_key.clone(), hash.clone());
+            }
             println!("  fetching {}@{} (forced)...", meta.name, ver_str);
             (content, hash)
-        } else if let Some(cached_hash) = store_index.get(&cache_key) {
-            if store.contains(cached_hash) {
-                if let Some(content) = store.get(cached_hash)? {
-                    if refresh {
-                        println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
-                        let content = fetch_meta_content(&meta)?;
-                        let hash = store.put(&content)?;
-                        store_index.insert(cache_key, hash.clone());
-                        (content, hash)
+        } else {
+            let cached = {
+                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.get(&cache_key).cloned()
+            };
+            if let Some(cached_hash) = cached {
+                if store.contains(&cached_hash) {
+                    if let Some(content) = store.get(&cached_hash)? {
+                        if refresh {
+                            println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
+                            let content = fetch_meta_content(&meta).await?;
+                            let hash = store.put(&content)?;
+                            {
+                                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                                idx.insert(cache_key.clone(), hash.clone());
+                            }
+                            (content, hash)
+                        } else {
+                            println!("  using cached {}@{}", meta.name, ver_str);
+                            (content, cached_hash)
+                        }
                     } else {
-                        println!("  using cached {}@{}", meta.name, ver_str);
-                        (content, cached_hash.clone())
+                        {
+                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                            idx.remove(&cache_key);
+                        }
+                        let content = fetch_meta_content(&meta).await?;
+                        let hash = store.put(&content)?;
+                        {
+                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                            idx.insert(cache_key.clone(), hash.clone());
+                        }
+                        (content, hash)
                     }
+                } else if offline {
+                    anyhow::bail!(
+                        "{}@{} not found in cache (--offline mode)",
+                        meta.name,
+                        ver_str
+                    );
                 } else {
-                    store_index.remove(&cache_key);
-                    let content = fetch_meta_content(&meta)?;
+                    {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.remove(&cache_key);
+                    }
+                    let content = fetch_meta_content(&meta).await?;
                     let hash = store.put(&content)?;
-                    store_index.insert(cache_key, hash.clone());
+                    {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.insert(cache_key.clone(), hash.clone());
+                    }
                     (content, hash)
                 }
+            } else if offline {
+                anyhow::bail!(
+                    "{}@{} not found in cache (--offline mode)",
+                    meta.name,
+                    ver_str
+                );
             } else {
-                store_index.remove(&cache_key);
-                let content = fetch_meta_content(&meta)?;
+                let content = fetch_meta_content(&meta).await?;
                 let hash = store.put(&content)?;
-                store_index.insert(cache_key, hash.clone());
+                {
+                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.insert(cache_key.clone(), hash.clone());
+                }
+                println!("  fetching {}@{}...", meta.name, ver_str);
                 (content, hash)
             }
-        } else if offline {
-            anyhow::bail!(
-                "{}@{} not found in cache (--offline mode)",
-                meta.name,
-                ver_str
-            );
-        } else {
-            let content = fetch_meta_content(&meta)?;
-            let hash = store.put(&content)?;
-            store_index.insert(cache_key, hash.clone());
-            println!("  fetching {}@{}...", meta.name, ver_str);
-            (content, hash)
         };
 
         // For tarball URLs, identity is embedded in the tarball — extract it now
@@ -417,6 +1098,13 @@ pub(crate) fn cmd_install_specs(
         if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
             println!("  failed to extract {}: {}", meta.name, e);
             continue;
+        }
+
+        if let Err(e) = install_bin_links(&node_modules, &meta.name, &pkg_dir) {
+            println!(
+                "  warning: failed to create bin links for {}: {}",
+                meta.name, e
+            );
         }
 
         let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
@@ -474,7 +1162,6 @@ pub(crate) fn cmd_install_specs(
             continue;
         }
 
-        // Add to manifest
         m.deps.push(crate::manifest::types::DependencyEntry {
             name: meta.name.clone(),
             source: meta.source.clone(),
@@ -499,18 +1186,35 @@ pub(crate) fn cmd_install_specs(
             security,
             sbom: None,
         });
+        installed_names.push(meta.name.clone());
 
         println!();
     }
 
     // Save store index
-    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
 
-    // Write updated ara.toml
-    let ara_toml_content = generate_ara_toml(&m);
-    std::fs::write(cwd.join("ara.toml"), &ara_toml_content).context("failed to write ara.toml")?;
+    // Write updated package.json
+    let pkg_json_content = crate::manifest::package_json::generate_package_json(&m);
+    std::fs::write(cwd.join("package.json"), &pkg_json_content)
+        .context("failed to write package.json")?;
 
-    println!("Updated ara.toml with {} dep(s)", m.deps.len());
+    println!("Updated package.json with {} dep(s)", m.deps.len());
+
+    // Install transitive dependencies discovered from the newly installed packages
+    install_transitive_deps(
+        &node_modules,
+        &store,
+        &store_index,
+        &mut pkg_entries,
+        &installed_names,
+    )
+    .await?;
 
     if !pkg_entries.is_empty() {
         write_lockfile(&cwd, Some(&store), &pkg_entries)?;
@@ -532,12 +1236,12 @@ struct ResolvedMeta {
 }
 
 /// Fetch content for a resolved meta, returning raw bytes.
-fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
+async fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
     match meta.source_type {
         SourceType::Npm | SourceType::Registry => {
             let registry_url = std::env::var("ARA_NPM_REGISTRY")
                 .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
-            let reg = crate::source::registry::RegistrySource::new(registry_url);
+            let reg = crate::source::registry::RegistrySource::new(registry_url)?;
             let identity = PackageIdentity {
                 source: SourceType::Npm,
                 name: meta.name.clone(),
@@ -546,6 +1250,7 @@ fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 requested_ref: None,
             };
             reg.fetch(&identity)
+                .await
                 .with_context(|| format!("failed to fetch {}@{}", meta.name, meta.version))
         }
         SourceType::Github => {
@@ -559,6 +1264,7 @@ fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 requested_ref: meta.commit.clone(),
             };
             src.fetch(&identity)
+                .await
                 .with_context(|| format!("failed to fetch github:{repo}"))
         }
         SourceType::Git => {
@@ -573,6 +1279,7 @@ fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 requested_ref: Some(commit_str),
             };
             src.fetch(&identity)
+                .await
                 .with_context(|| format!("failed to fetch git:{url}"))
         }
         SourceType::Url => {
@@ -586,13 +1293,14 @@ fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 requested_ref: None,
             };
             src.fetch(&identity)
+                .await
                 .with_context(|| format!("failed to download {url}"))
         }
         _ => anyhow::bail!("unsupported source type: {}", meta.source_type),
     }
 }
 
-fn resolve_npm_meta(
+async fn resolve_npm_meta(
     name: &str,
     version: Option<&str>,
     range: Option<&str>,
@@ -600,7 +1308,7 @@ fn resolve_npm_meta(
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
 
-    let reg = crate::source::registry::RegistrySource::new(registry_url);
+    let reg = crate::source::registry::RegistrySource::new(registry_url)?;
 
     let (resolved_ver_str, manifest_ver) = if let Some(v) = version {
         let trimmed = v
@@ -616,12 +1324,14 @@ fn resolve_npm_meta(
         } else {
             let concrete = reg
                 .resolve(name)
+                .await
                 .with_context(|| format!("failed to resolve {name} for range {v}"))?;
             (concrete, v.to_string())
         }
     } else {
         let concrete = reg
             .resolve(name)
+            .await
             .with_context(|| format!("failed to resolve {name}"))?;
         let manifest = apply_range(&concrete, range);
         (concrete, manifest)
@@ -686,13 +1396,13 @@ fn resolve_tarball_meta(url: &str) -> Result<ResolvedMeta> {
     })
 }
 
-fn resolve_spec_meta(
+async fn resolve_spec_meta(
     target: &crate::source::url::InstallTarget,
     range: Option<&str>,
 ) -> Result<ResolvedMeta> {
     match target {
         crate::source::url::InstallTarget::Npm { name, version } => {
-            resolve_npm_meta(name, version.as_deref(), range)
+            resolve_npm_meta(name, version.as_deref(), range).await
         }
         crate::source::url::InstallTarget::Github { repo, commit } => {
             resolve_github_meta(repo, commit.as_deref())
@@ -728,125 +1438,50 @@ fn derive_name_from_git_url(url: &str) -> Option<String> {
     }
 }
 
-fn toml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\x08' => out.push_str("\\b"),
-            '\x0C' => out.push_str("\\f"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn generate_ara_toml(m: &crate::manifest::types::Manifest) -> String {
-    let mut out = String::new();
-
-    out.push_str(&format!(
-        "[project]\nname = \"{}\"\nversion = \"{}\"\n",
-        toml_escape(&m.project.name),
-        toml_escape(&m.project.version)
-    ));
-
-    if !m.deps.is_empty() {
-        out.push_str("\n[deps]\n");
-        for dep in &m.deps {
-            out.push_str(&format!(
-                "\"{}\" = {{ source = \"{}\"",
-                toml_escape(&dep.name),
-                toml_escape(&dep.source)
-            ));
-            if let Some(kind) = &dep.kind {
-                out.push_str(&format!(", kind = \"{}\"", toml_escape(kind)));
-            }
-            if let Some(ver) = &dep.version {
-                out.push_str(&format!(", version = \"{}\"", toml_escape(ver)));
-            }
-            if let Some(repo) = &dep.repo {
-                out.push_str(&format!(", repo = \"{}\"", toml_escape(repo)));
-            }
-            if let Some(url) = &dep.url {
-                out.push_str(&format!(", url = \"{}\"", toml_escape(url)));
-            }
-            if let Some(commit) = &dep.commit {
-                out.push_str(&format!(", commit = \"{}\"", toml_escape(commit)));
-            }
-            if let Some(path) = &dep.path {
-                out.push_str(&format!(", path = \"{}\"", toml_escape(path)));
-            }
-            out.push_str(" }\n");
-        }
-    }
-
-    if let Some(ws) = &m.workspace {
-        out.push_str("\n[workspace]\nmembers = [");
-        for (i, member) in ws.members.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            out.push_str(&format!("\"{}\"", toml_escape(member)));
-        }
-        out.push_str("]\n");
-    }
-
-    if !m.scripts.is_empty() {
-        out.push_str("\n[scripts]\n");
-        for script in &m.scripts {
-            out.push_str(&format!(
-                "\"{}\" = \"{}\"\n",
-                toml_escape(&script.name),
-                toml_escape(&script.command)
-            ));
-        }
-    }
-
-    out
-}
-
 fn read_manifest(cwd: &Path) -> Result<crate::manifest::types::Manifest> {
     let manifest_path = cwd.join("ara.toml");
     let pkg_json_path = cwd.join("package.json");
 
-    if manifest_path.exists() {
-        let content = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        let m = parser::parse(&content).context("failed to parse ara.toml")?;
-        return Ok(m);
-    }
+    let mut final_manifest: Option<crate::manifest::types::Manifest> = None;
 
     if pkg_json_path.exists() {
         let content = std::fs::read_to_string(&pkg_json_path)
             .with_context(|| format!("failed to read {}", pkg_json_path.display()))?;
         let m =
             package_json::parse_package_json(&content).context("failed to parse package.json")?;
+        final_manifest = Some(m);
+    }
 
-        let ara_toml_content = generate_ara_toml(&m);
-        std::fs::write(&manifest_path, &ara_toml_content)
-            .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    if manifest_path.exists() {
+        let content = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let m = parser::parse(&content).context("failed to parse ara.toml")?;
 
-        println!(
-            "No ara.toml found. Using package.json as manifest — generated {}",
-            manifest_path.display()
-        );
+        if let Some(mut fm) = final_manifest {
+            // merge ara.toml advanced settings into package.json manifest
+            fm.security = m.security;
+            fm.build = m.build;
+            // Note: We deliberately do NOT merge deps, scripts, or workspaces from ara.toml
+            // because package.json is now the source of truth for them.
+            final_manifest = Some(fm);
+        } else {
+            // if no package.json exists, fallback to ara.toml completely
+            final_manifest = Some(m);
+        }
+    }
 
+    if let Some(m) = final_manifest {
         return Ok(m);
     }
 
     Err(anyhow::anyhow!(
-        "no manifest found: neither ara.toml nor package.json exists in {}",
+        "no manifest found: neither package.json nor ara.toml exists in {}",
         cwd.display()
     ))
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
+async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let mut m = read_manifest(cwd)?;
 
     println!(
@@ -892,17 +1527,36 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     println!("Resolved {} packages", graph.nodes.len());
 
     // Connect resolve(): enhance each node's version from registry sources
-    for node in &mut graph.nodes {
-        if let Some(dep) = find_dep(&m.deps, &node.name) {
-            if let Ok(src) = create_source(node.source, dep) {
-                if let Ok(version_str) = src.resolve(&node.name) {
-                    if let Ok(parsed) = Version::parse(&version_str) {
-                        node.version = parsed;
+    let t_resolve = Instant::now();
+    let dep_lookup: HashMap<&str, &crate::manifest::types::DependencyEntry> =
+        m.deps.iter().map(|d| (d.name.as_str(), d)).collect();
+    let nodes = graph.nodes.clone();
+    let mut tasks = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(dep) = dep_lookup.get(node.name.as_str()).copied() {
+            let node_name = node.name.clone();
+            let source_type = node.source;
+            tasks.push(async move {
+                if let Ok(src) = create_source(source_type, dep) {
+                    if let Ok(version_str) = src.resolve(&node_name).await {
+                        if let Ok(parsed) = Version::parse(&version_str) {
+                            return Some((i, parsed));
+                        }
                     }
                 }
-            }
+                None
+            });
         }
     }
+    let results = futures::future::join_all(tasks).await;
+    for (i, version) in results.into_iter().flatten() {
+        graph.nodes[i].version = version;
+    }
+    eprintln!(
+        "  [profile] resolve versions ({} nodes): {:?}",
+        graph.nodes.len(),
+        t_resolve.elapsed()
+    );
 
     // Connect has_cycles(): warn if circular dependencies found
     if graph.has_cycles() {
@@ -944,7 +1598,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     store.ensure_dirs()?;
 
     let index_path = store_base.join("index.json");
-    let mut store_index: HashMap<String, String> = if index_path.exists() {
+    let store_index: HashMap<String, String> = if index_path.exists() {
         let idx_content = std::fs::read_to_string(&index_path)?;
         serde_json::from_str(&idx_content).unwrap_or_default()
     } else {
@@ -957,61 +1611,151 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         }
     }
 
+    let store_index = Arc::new(Mutex::new(store_index));
     let mut pkg_entries: Vec<PackageEntry> = Vec::new();
 
+    // Process packages in parallel
+    struct ProcessedNode {
+        name: String,
+        version: String,
+        hash_str: String,
+        pkg_dir: PathBuf,
+        source_type: String,
+        analysis: Result<crate::types::AnalysisResult>,
+    }
+
+    let t_phase1 = Instant::now();
+    let mut tasks = Vec::new();
     for node in &graph.nodes {
-        let ver_str = format!(
-            "{}.{}.{}",
-            node.version.major, node.version.minor, node.version.patch
-        );
+        let node = node.clone();
+        let m_deps = m.deps.clone();
+        let store = store.clone();
+        let store_index = Arc::clone(&store_index);
+        let node_modules = node_modules.to_path_buf();
 
-        let Some(dep) = find_dep(&m.deps, &node.name) else {
-            println!("  skipped {}: no dependency config", node.name);
-            continue;
-        };
+        tasks.push(tokio::spawn(async move {
+            let ver_str = format!(
+                "{}.{}.{}",
+                node.version.major, node.version.minor, node.version.patch
+            );
 
-        let src = match create_source(node.source, dep) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("  skipped {}: failed to create source ({})", node.name, e);
-                continue;
-            }
-        };
+            let dep = match find_dep(&m_deps, &node.name) {
+                Some(d) => d,
+                None => return None,
+            };
 
-        let cache_key = format!("{}@{}", node.name, ver_str);
+            let src = match create_source(node.source, dep) {
+                Ok(s) => s,
+                Err(_) => return None,
+            };
 
-        let (pkg_content, hash_str) = if let Some(cached_hash) = store_index.get(&cache_key) {
-            if store.contains(cached_hash) {
-                if let Some(content) = store.get(cached_hash)? {
+            let cache_key = format!("{}@{}", node.name, ver_str);
+
+            let cached = {
+                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.get(&cache_key).cloned()
+            };
+
+            let hash_str = if let Some(cached_hash) = cached {
+                if store.contains(&cached_hash) {
                     println!("  using cached {}@{}", node.name, ver_str);
-                    (content, cached_hash.clone())
+                    cached_hash
                 } else {
-                    store_index.remove(&cache_key);
-                    fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
+                    {
+                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                        idx.remove(&cache_key);
+                    }
+                    fetch_and_store_parallel(
+                        &store,
+                        &store_index,
+                        &src,
+                        &cache_key,
+                        &node,
+                        &ver_str,
+                    )
+                    .await?
                 }
             } else {
-                store_index.remove(&cache_key);
-                fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
+                fetch_and_store_parallel(&store, &store_index, &src, &cache_key, &node, &ver_str)
+                    .await?
+            };
+
+            let pkg_dir = node_modules.join(&node.name);
+            let pkg_dir_clone = pkg_dir.clone();
+            let store_clone = store.clone();
+            let hash_str_clone = hash_str.clone();
+            match tokio::task::spawn_blocking(move || {
+                extract_package_cached(&store_clone, &hash_str_clone, &pkg_dir_clone)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!("  failed to extract {}: {}", node.name, e);
+                    return None;
+                }
+                Err(e) => {
+                    eprintln!("  failed to extract {} (task panic): {}", node.name, e);
+                    return None;
+                }
             }
-        } else {
-            fetch_and_store(&store, &mut store_index, &src, &cache_key, node, &ver_str)?
-        };
 
-        let pkg_dir = node_modules.join(&node.name);
+            if let Err(e) = install_bin_links(&node_modules, &node.name, &pkg_dir) {
+                eprintln!(
+                    "  warning: failed to create bin links for {}: {}",
+                    node.name, e
+                );
+            }
 
-        // clean any existing directory
-        let _ = std::fs::remove_dir_all(&pkg_dir);
-        std::fs::create_dir_all(&pkg_dir)?;
+            let source_type = match node.source {
+                SourceType::Npm | SourceType::Registry => "registry",
+                SourceType::Github => "github",
+                SourceType::Git => "git",
+                SourceType::Local => "local",
+                SourceType::Url => "url",
+                SourceType::Workspace => "workspace",
+            }
+            .to_string();
 
-        if let Err(e) = extract_tarball(&pkg_content, &pkg_dir) {
-            println!("  failed to extract {}: {}", node.name, e);
-            continue;
-        }
+            let pkg_dir_clone2 = pkg_dir.clone();
+            let analysis = match tokio::task::spawn_blocking(move || {
+                analyzer::analyze_package(&pkg_dir_clone2)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("  failed to analyze {} (task panic): {}", node.name, e);
+                    return None;
+                }
+            };
 
-        let (allowed, security) = match analyzer::analyze_package(&pkg_dir) {
+            Some(ProcessedNode {
+                name: node.name.clone(),
+                version: ver_str,
+                hash_str,
+                pkg_dir,
+                source_type,
+                analysis,
+            })
+        }));
+    }
+    let processed: Vec<ProcessedNode> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .filter_map(|x| x.ok().flatten())
+        .collect();
+    eprintln!(
+        "  [profile] phase 1 (direct deps): {:?}",
+        t_phase1.elapsed()
+    );
+
+    // Handle security decisions sequentially (necessary for interactive prompts)
+    for pkg in &processed {
+        let (allowed, security) = match &pkg.analysis {
             Ok(result) => {
                 if result.findings.is_empty() {
-                    print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                    print!("  ✓ {}@{} ({})", pkg.name, pkg.version, pkg.hash_str);
                     (
                         true,
                         Some(SecurityMeta {
@@ -1024,9 +1768,9 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                     let loc = first.location.as_deref().unwrap_or("");
                     print!(
                         "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — {} in {}",
-                        node.name,
-                        ver_str,
-                        hash_str,
+                        pkg.name,
+                        pkg.version,
+                        pkg.hash_str,
                         result.findings.len(),
                         rl,
                         first.description,
@@ -1039,9 +1783,12 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                         }),
                     )
                 } else {
-                    match prompt_allow_package(&node.name, &ver_str, &result.findings) {
+                    match prompt_allow_package(&pkg.name, &pkg.version, &result.findings) {
                         AllowDecision::Yes | AllowDecision::Sandbox => {
-                            println!("  ✓ {}@{} ({}) — allowed", node.name, ver_str, hash_str);
+                            println!(
+                                "  ✓ {}@{} ({}) — allowed",
+                                pkg.name, pkg.version, pkg.hash_str
+                            );
                             (
                                 true,
                                 Some(SecurityMeta {
@@ -1050,15 +1797,18 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                             )
                         }
                         AllowDecision::No => {
-                            let _ = std::fs::remove_dir_all(&pkg_dir);
-                            println!("  ✗ {}@{} ({}) — denied", node.name, ver_str, hash_str);
+                            let _ = std::fs::remove_dir_all(&pkg.pkg_dir);
+                            println!(
+                                "  ✗ {}@{} ({}) — denied",
+                                pkg.name, pkg.version, pkg.hash_str
+                            );
                             (false, None)
                         }
                     }
                 }
             }
             Err(_) => {
-                print!("  ✓ {}@{} ({})", node.name, ver_str, hash_str);
+                print!("  ✓ {}@{} ({})", pkg.name, pkg.version, pkg.hash_str);
                 (true, None)
             }
         };
@@ -1068,10 +1818,10 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         }
 
         pkg_entries.push(PackageEntry {
-            name: node.name.clone(),
-            version: ver_str.clone(),
-            source: node.source.to_string(),
-            package_hash: hash_str.clone(),
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            source: pkg.source_type.clone(),
+            package_hash: pkg.hash_str.clone(),
             integrity: None,
             signature: None,
             repository: None,
@@ -1083,9 +1833,38 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
         println!();
     }
+    eprintln!(
+        "  [profile] security eval ({} pkgs): {:?}",
+        processed.len(),
+        t_phase1.elapsed()
+    );
 
-    // Save store index for future cache lookups
-    std::fs::write(&index_path, serde_json::to_string_pretty(&store_index)?)?;
+    // Save store index
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
+
+    // Install transitive dependencies discovered from extracted packages
+    let installed_names: Vec<String> = processed.iter().map(|p| p.name.clone()).collect();
+    install_transitive_deps(
+        &node_modules,
+        &store,
+        &store_index,
+        &mut pkg_entries,
+        &installed_names,
+    )
+    .await?;
+
+    // Save store index again to persist entries added by install_transitive_deps
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
@@ -1117,14 +1896,14 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     Ok(())
 }
 
-fn fetch_and_store(
+async fn fetch_and_store_parallel(
     store: &Store,
-    store_index: &mut HashMap<String, String>,
+    store_index: &Arc<Mutex<HashMap<String, String>>>,
     src: &Source,
     cache_key: &str,
     node: &crate::resolver::graph::Node,
     ver_str: &str,
-) -> Result<(Vec<u8>, String)> {
+) -> Option<String> {
     println!("  fetching {}@{}...", node.name, ver_str);
 
     let identity = crate::types::PackageIdentity {
@@ -1135,17 +1914,83 @@ fn fetch_and_store(
         requested_ref: None,
     };
 
-    let pkg_content = match src.fetch(&identity) {
+    let pkg_content = match src.fetch(&identity).await {
         Ok(c) => c,
         Err(e) => {
-            return Err(anyhow::anyhow!("failed to fetch {}: {}", node.name, e));
+            eprintln!("  failed to fetch {}: {}", node.name, e);
+            return None;
         }
     };
 
-    let hash_str = store.put(&pkg_content)?;
-    store_index.insert(cache_key.to_string(), hash_str.clone());
+    let hash_str = match store.put(&pkg_content) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("  failed to store {}: {}", node.name, e);
+            return None;
+        }
+    };
 
-    Ok((pkg_content, hash_str))
+    {
+        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+        idx.insert(cache_key.to_string(), hash_str.clone());
+    }
+
+    Some(hash_str)
+}
+
+/// Extract a tarball from the CAS store to the package directory.
+/// Uses a cached extracted directory in the store to avoid re-extraction.
+fn extract_package_cached(store: &Store, hash_str: &str, pkg_dir: &Path) -> Result<()> {
+    let extracted_dir = store.get_extracted_path(hash_str);
+
+    if !extracted_dir.exists() {
+        let content = store
+            .get(hash_str)?
+            .ok_or_else(|| anyhow::anyhow!("package {hash_str} not in store"))?;
+        std::fs::create_dir_all(&extracted_dir)
+            .with_context(|| format!("failed to create {}", extracted_dir.display()))?;
+        extract_tarball(&content, &extracted_dir)
+            .with_context(|| format!("failed to extract to {}", extracted_dir.display()))?;
+    }
+
+    let _ = std::fs::remove_dir_all(pkg_dir);
+    hardlink_dir(&extracted_dir, pkg_dir)
+        .with_context(|| format!("failed to hardlink to {}", pkg_dir.display()))
+}
+
+/// Recursively create hardlinks from `src` to `dst`, falling back to copy
+/// if hardlinking across filesystems fails.
+fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry?;
+        let relative = entry
+            .path()
+            .strip_prefix(src)
+            .map_err(|_| anyhow::anyhow!("path prefix error"))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dst.join(relative);
+
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_symlink() {
+            let link_target = std::fs::read_link(entry.path())?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_file(&target);
+            std::os::unix::fs::symlink(&link_target, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if std::fs::hard_link(entry.path(), &target).is_err() {
+                let _ = std::fs::copy(entry.path(), &target);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1239,8 +2084,8 @@ mod tests {
         assert_eq!(extracted, "hello world\n");
     }
 
-    #[test]
-    fn test_cmd_install_local_dep() {
+    #[tokio::test]
+    async fn test_cmd_install_local_dep() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
 
@@ -1267,7 +2112,7 @@ mod tests {
         );
         std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
 
-        cmd_install_in(&root_path, true).unwrap();
+        cmd_install_in(&root_path, true).await.unwrap();
 
         assert!(root_path.join("node_modules").exists());
         assert!(root_path.join("node_modules/dep-a").exists());
@@ -1280,8 +2125,8 @@ mod tests {
         assert_eq!(lf.packages[0].name, "dep-a");
     }
 
-    #[test]
-    fn test_cmd_install_no_deps() {
+    #[tokio::test]
+    async fn test_cmd_install_no_deps() {
         let root = tempfile::tempdir().unwrap();
         let root_manifest = r#"
             [project]
@@ -1289,13 +2134,13 @@ mod tests {
             version = "0.0.1"
         "#;
         std::fs::write(root.path().join("ara.toml"), root_manifest).unwrap();
-        assert!(cmd_install_in(root.path(), true).is_ok());
+        assert!(cmd_install_in(root.path(), true).await.is_ok());
     }
 
-    #[test]
-    fn test_cmd_install_missing_manifest() {
+    #[tokio::test]
+    async fn test_cmd_install_missing_manifest() {
         let root = tempfile::tempdir().unwrap();
-        assert!(cmd_install_in(root.path(), true).is_err());
+        assert!(cmd_install_in(root.path(), true).await.is_err());
     }
 
     #[test]
@@ -1374,90 +2219,6 @@ version = "0.1.0"
     }
 
     #[test]
-    fn test_generate_ara_toml_minimal() {
-        let m = crate::manifest::types::Manifest {
-            project: crate::manifest::types::Project {
-                name: "app".into(),
-                version: "1.0.0".into(),
-            },
-            deps: vec![],
-            workspace: None,
-            scripts: vec![],
-            security: None,
-            build: None,
-            package_json_extras: None,
-        };
-        let out = generate_ara_toml(&m);
-        assert!(out.contains(r#"name = "app""#));
-        assert!(out.contains(r#"version = "1.0.0""#));
-    }
-
-    #[test]
-    fn test_generate_ara_toml_with_deps() {
-        let m = crate::manifest::types::Manifest {
-            project: crate::manifest::types::Project {
-                name: "app".into(),
-                version: "0.1.0".into(),
-            },
-            deps: vec![
-                crate::manifest::types::DependencyEntry {
-                    name: "zod".into(),
-                    source: "npm".into(),
-                    kind: Some("prod".into()),
-                    version: Some("^3.0.0".into()),
-                    repo: None,
-                    url: None,
-                    commit: None,
-                    path: None,
-                },
-                crate::manifest::types::DependencyEntry {
-                    name: "vitest".into(),
-                    source: "npm".into(),
-                    kind: Some("dev".into()),
-                    version: Some("^1.0.0".into()),
-                    repo: None,
-                    url: None,
-                    commit: None,
-                    path: None,
-                },
-            ],
-            workspace: None,
-            scripts: vec![],
-            security: None,
-            build: None,
-            package_json_extras: None,
-        };
-        let out = generate_ara_toml(&m);
-        assert!(out.contains(r#"zod"#));
-        assert!(out.contains(r#"vitest"#));
-        assert!(out.contains(r#"kind = "prod""#));
-        assert!(out.contains(r#"kind = "dev""#));
-        assert!(out.contains(r#"version = "^3.0.0""#));
-    }
-
-    #[test]
-    fn test_generate_ara_toml_with_scripts() {
-        let m = crate::manifest::types::Manifest {
-            project: crate::manifest::types::Project {
-                name: "app".into(),
-                version: "0.1.0".into(),
-            },
-            deps: vec![],
-            workspace: None,
-            scripts: vec![crate::manifest::types::ScriptEntry {
-                name: "build".into(),
-                command: "tsc".into(),
-            }],
-            security: None,
-            build: None,
-            package_json_extras: None,
-        };
-        let out = generate_ara_toml(&m);
-        assert!(out.contains("[scripts]"));
-        assert!(out.contains(r#""build" = "tsc""#));
-    }
-
-    #[test]
     fn test_read_manifest_with_package_json() {
         let root = tempfile::tempdir().unwrap();
         let pkg_json =
@@ -1468,27 +2229,29 @@ version = "0.1.0"
         assert_eq!(m.project.name, "my-app");
         assert_eq!(m.deps.len(), 1);
         assert_eq!(m.deps[0].name, "zod");
-
-        // Should have generated ara.toml
-        let ara_toml = std::fs::read_to_string(root.path().join("ara.toml")).unwrap();
-        assert!(ara_toml.contains(r#"name = "my-app""#));
     }
 
     #[test]
-    fn test_read_manifest_ara_toml_preferred() {
+    fn test_read_manifest_merge_ara_toml() {
         let root = tempfile::tempdir().unwrap();
         // Both exist
         let pkg_json = r#"{"name": "from-pkg-json", "version": "1.0.0"}"#;
         std::fs::write(root.path().join("package.json"), pkg_json).unwrap();
         let ara_toml = r#"[project]
-name = "from-ara-toml"
-version = "2.0.0"
+name = "ignored"
+version = "ignored"
+
+[security]
+require_review = true
 "#;
         std::fs::write(root.path().join("ara.toml"), ara_toml).unwrap();
 
         let m = read_manifest(root.path()).unwrap();
-        assert_eq!(m.project.name, "from-ara-toml");
-        assert_eq!(m.project.version, "2.0.0");
+        // Should take name from package.json
+        assert_eq!(m.project.name, "from-pkg-json");
+        assert_eq!(m.project.version, "1.0.0");
+        // Should take security from ara.toml
+        assert_eq!(m.security.unwrap().require_review, Some(true));
     }
 
     #[test]
@@ -1517,8 +2280,8 @@ version = "2.0.0"
         assert_eq!(entries[0].version.as_deref(), Some("0.1.0"));
     }
 
-    #[test]
-    fn test_cmd_install_unicode_name() {
+    #[tokio::test]
+    async fn test_cmd_install_unicode_name() {
         let root = tempfile::tempdir().unwrap();
         let root_path = root.path().to_path_buf();
 
@@ -1545,7 +2308,7 @@ version = "2.0.0"
         );
         std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
 
-        cmd_install_in(&root_path, true).unwrap();
+        cmd_install_in(&root_path, true).await.unwrap();
 
         let nm = root_path.join("node_modules");
         assert!(nm.join("café-🔥").exists());

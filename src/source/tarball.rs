@@ -15,14 +15,15 @@ impl TarballSource {
     /// Tarball source doesn't resolve — the URL is the identity.
     /// Returns the URL itself as the "version" for consistency.
     #[allow(clippy::unnecessary_wraps)]
-    pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
+    pub async fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.url.clone())
     }
 
-    pub fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub async fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let body = client
             .get(&self.url)
+            .await
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
     }

@@ -6,6 +6,7 @@ mod gc;
 pub(crate) mod install;
 mod prompt;
 mod run;
+mod x;
 
 #[derive(Parser)]
 #[command(name = "ara", version = crate::version::VERSION, about = "Ara package manager")]
@@ -44,6 +45,43 @@ pub enum Commands {
         #[arg(long)]
         non_interactive: bool,
     },
+    /// Add project dependencies
+    Add {
+        /// Package specifiers to install directly (name, name@version, git URL, etc.)
+        #[arg(required = true)]
+        deps: Vec<String>,
+        /// Save as dev dependency
+        #[arg(long)]
+        save_dev: bool,
+        /// Save as peer dependency
+        #[arg(long)]
+        save_peer: bool,
+        /// Save as optional dependency
+        #[arg(long)]
+        save_optional: bool,
+        /// Version range strategy: "exact" (default), "caret" (^), or "patch" (~)
+        #[arg(long)]
+        range: Option<String>,
+        /// Force re-download even if cached
+        #[arg(long)]
+        force: bool,
+        /// Bypass cache for mutable references (branches, tags)
+        #[arg(long)]
+        refresh: bool,
+        /// Fail if package is not in cache
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        non_interactive: bool,
+    },
+    /// Execute a package binary (like npx or pnpm dlx)
+    X {
+        /// Package to execute (e.g. create-next-app@latest)
+        package: String,
+        /// Arguments to pass to the package
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run a script in a sandboxed environment
     Run {
         script: String,
@@ -71,7 +109,7 @@ pub enum Commands {
 }
 
 impl Cli {
-    pub fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         match &self.command {
             Commands::Install {
                 deps,
@@ -96,10 +134,36 @@ impl Cli {
                         *offline,
                         *non_interactive,
                     )
+                    .await
                 } else {
-                    install::cmd_install(*non_interactive)
+                    install::cmd_install(*non_interactive).await
                 }
             }
+            Commands::Add {
+                deps,
+                save_dev,
+                save_peer,
+                save_optional,
+                range,
+                force,
+                refresh,
+                offline,
+                non_interactive,
+            } => {
+                install::cmd_install_specs(
+                    deps,
+                    *save_dev,
+                    *save_peer,
+                    *save_optional,
+                    range.as_deref(),
+                    *force,
+                    *refresh,
+                    *offline,
+                    *non_interactive,
+                )
+                .await
+            }
+            Commands::X { package, args } => x::cmd_x(package, args).await,
             Commands::Run { script, profile } => run::cmd_run(script, profile),
             Commands::Analyze { path } => analyze::cmd_analyze(path),
             Commands::Audit { path } => analyze::cmd_audit(path),

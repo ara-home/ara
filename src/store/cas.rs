@@ -20,6 +20,7 @@ fn validate_key(key: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct Store {
     base_path: PathBuf,
 }
@@ -45,6 +46,16 @@ impl Store {
 
     fn graph_path(&self, graph_hash: &str) -> PathBuf {
         self.base_path.join("graphs").join(graph_hash)
+    }
+
+    #[must_use]
+    pub fn get_extracted_path(&self, hash_str: &str) -> PathBuf {
+        self.base_path.join("extracted").join(hash_str)
+    }
+
+    #[must_use]
+    pub fn has_extracted(&self, hash_str: &str) -> bool {
+        self.get_extracted_path(hash_str).exists()
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String, StoreError> {

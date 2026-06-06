@@ -1,26 +1,117 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
 use crate::source::SourceError;
-use crate::types::{PackageIdentity, Version};
+use crate::types::{Constraint, PackageIdentity, Version};
 use crate::util::http::HttpClient;
 
+const CACHE_TTL: Duration = Duration::from_secs(604800); // 7 days
+
+type DepMap = HashMap<String, String>;
+
+#[derive(Clone)]
 pub struct RegistrySource {
     pub registry_url: String,
+    client: HttpClient,
 }
 
 impl RegistrySource {
-    #[must_use]
-    pub const fn new(registry_url: String) -> Self {
-        Self { registry_url }
+    pub fn new(registry_url: String) -> Result<Self, SourceError> {
+        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        Ok(Self {
+            registry_url,
+            client,
+        })
     }
 
-    pub fn resolve(&self, name: &str) -> Result<String, SourceError> {
-        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
+    /// Fetch package metadata from the registry, using a local disk cache
+    /// for the default npm registry to avoid redundant HTTP requests.
+    pub(crate) async fn fetch_metadata(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, SourceError> {
+        let use_cache = self.registry_url.contains("registry.npmjs.org");
+
+        if use_cache {
+            if let Some(cached) = Self::read_cached_metadata(name) {
+                return Ok(cached);
+            }
+        }
+
         let url = format!("{}/{name}", self.registry_url);
-        let body = client
+        let body = self
+            .client
             .get(&url)
+            .await
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
 
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
+
+        if use_cache {
+            Self::write_cached_metadata(name, &parsed);
+        }
+
+        Ok(parsed)
+    }
+
+    fn cache_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".ara")
+                .join("cache")
+                .join("metadata"),
+        )
+    }
+
+    fn cache_path(name: &str) -> Option<PathBuf> {
+        let dir = Self::cache_dir()?;
+        let safe_name = name.replace('/', "_").replace('@', "");
+        Some(dir.join(format!("{safe_name}.json")))
+    }
+
+    fn read_cached_metadata(name: &str) -> Option<serde_json::Value> {
+        let path = Self::cache_path(name)?;
+        if !path.exists() {
+            return None;
+        }
+        let metadata = std::fs::metadata(&path).ok()?;
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(elapsed) = modified.elapsed() {
+                if elapsed > CACHE_TTL {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+            }
+        }
+        let file = std::fs::File::open(path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        let parsed: serde_json::Value = serde_json::from_reader(reader).ok()?;
+        // Support legacy format: unwrap {"body": metadata} wrapper
+        if parsed.get("body").and_then(|b| b.get("versions")).is_some() {
+            parsed.get("body").cloned()
+        } else {
+            Some(parsed)
+        }
+    }
+
+    fn write_cached_metadata(name: &str, body: &serde_json::Value) {
+        let path = match Self::cache_path(name) {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(content) = serde_json::to_string(body) {
+            let _ = std::fs::write(&path, content);
+        }
+    }
+
+    pub async fn resolve(&self, name: &str) -> Result<String, SourceError> {
+        let parsed = self.fetch_metadata(name).await?;
 
         // Prefer the `latest` dist-tag when present (matches npm behavior)
         if let Some(latest_tag) = parsed
@@ -58,8 +149,41 @@ impl RegistrySource {
         latest.ok_or(SourceError::VersionNotFound)
     }
 
-    pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
-        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
+    /// Resolve the best version matching a constraint string (e.g., `^0.5.15`).
+    /// Returns the highest published version that satisfies the constraint.
+    pub async fn resolve_matching(
+        &self,
+        name: &str,
+        constraint_str: &str,
+    ) -> Result<String, SourceError> {
+        let parsed = self.fetch_metadata(name).await?;
+
+        let constraint =
+            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
+
+        let versions = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .ok_or(SourceError::PackageNotFound)?;
+
+        let mut best: Option<Version> = None;
+        for (ver_str, _) in versions {
+            if let Ok(ver) = Version::parse(ver_str) {
+                if constraint.satisfied_by(&ver) {
+                    match &best {
+                        Some(current) if ver > *current => best = Some(ver),
+                        None => best = Some(ver),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        best.map(|v| v.to_string())
+            .ok_or(SourceError::VersionNotFound)
+    }
+
+    pub async fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let ver_str = identity.version.to_string();
         // For scoped packages (@scope/name), the tarball filename uses only the bare name
         let bare_name = identity.name.rsplit('/').next().unwrap_or(&identity.name);
@@ -68,10 +192,111 @@ impl RegistrySource {
             self.registry_url,
             name = identity.name
         );
-        let body = client
+        let body = self
+            .client
             .get(&tarball_url)
+            .await
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
+    }
+
+    /// Resolve the exact version matching a constraint, then return that
+    /// version's dependency declarations from the registry metadata.
+    /// Returns (exact_version, dependencies, peer_dependencies, optional_dependencies).
+    pub async fn resolve_and_get_deps(
+        &self,
+        name: &str,
+        constraint_str: &str,
+    ) -> Result<(String, DepMap, DepMap, DepMap), SourceError> {
+        let parsed = self.fetch_metadata(name).await?;
+
+        let constraint =
+            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
+
+        let versions = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .ok_or(SourceError::PackageNotFound)?;
+
+        // Find best matching version
+        let mut best: Option<&serde_json::Value> = None;
+        let mut best_ver: Option<String> = None;
+        for (ver_str, ver_data) in versions {
+            if let Ok(ver) = Version::parse(ver_str) {
+                if constraint.satisfied_by(&ver) {
+                    match &best_ver {
+                        Some(ref current) => {
+                            if let Ok(current_ver) = Version::parse(current) {
+                                if ver > current_ver {
+                                    best = Some(ver_data);
+                                    best_ver = Some(ver_str.clone());
+                                }
+                            }
+                        }
+                        None => {
+                            best = Some(ver_data);
+                            best_ver = Some(ver_str.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let ver_str = best_ver.ok_or(SourceError::VersionNotFound)?;
+        let ver_data = best.ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            ver_str,
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
+    }
+
+    /// Given an exact package name and version, read its dependency
+    /// declarations from the registry metadata (no resolution needed).
+    pub async fn get_deps_for_version(
+        &self,
+        name: &str,
+        version_str: &str,
+    ) -> Result<(DepMap, DepMap, DepMap), SourceError> {
+        let parsed = self.fetch_metadata(name).await?;
+
+        let ver_data = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get(version_str))
+            .ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
     }
 }
 
@@ -80,9 +305,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    #[test]
-    fn test_resolve_finds_latest_version() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_finds_latest_version() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let body = serde_json::json!({
             "versions": {
@@ -96,44 +321,50 @@ mod tests {
             .mock("GET", "/zod")
             .with_status(200)
             .with_body(body.to_string())
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let version = src.resolve("zod").unwrap();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let version = src.resolve("zod").await.unwrap();
         assert_eq!(version, "2.0.0");
-        mock.assert();
+        mock.assert_async().await;
     }
 
-    #[test]
-    fn test_resolve_package_not_found_404() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_package_not_found_404() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
-        let mock = server.mock("GET", "/missing").with_status(404).create();
+        let mock = server
+            .mock("GET", "/missing")
+            .with_status(404)
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let err = src.resolve("missing").unwrap_err();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let err = src.resolve("missing").await.unwrap_err();
         assert!(matches!(err, SourceError::NetworkError(_)));
-        mock.assert();
+        mock.assert_async().await;
     }
 
-    #[test]
-    fn test_resolve_invalid_json() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_invalid_json() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let _mock = server
             .mock("GET", "/bad")
             .with_status(200)
             .with_body("this is not json")
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let err = src.resolve("bad").unwrap_err();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let err = src.resolve("bad").await.unwrap_err();
         assert!(matches!(err, SourceError::PackageNotFound));
     }
 
-    #[test]
-    fn test_resolve_no_versions() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_no_versions() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let body = serde_json::json!({ "versions": {} });
 
@@ -141,16 +372,17 @@ mod tests {
             .mock("GET", "/empty")
             .with_status(200)
             .with_body(body.to_string())
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let err = src.resolve("empty").unwrap_err();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let err = src.resolve("empty").await.unwrap_err();
         assert!(matches!(err, SourceError::VersionNotFound));
     }
 
-    #[test]
-    fn test_resolve_prefers_dist_tags_latest() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_prefers_dist_tags_latest() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         // dist-tags.latest points to 2.0.0 even though 3.0.0-canary exists
         let body = serde_json::json!({
@@ -165,16 +397,17 @@ mod tests {
             .mock("GET", "/pkg")
             .with_status(200)
             .with_body(body.to_string())
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let version = src.resolve("pkg").unwrap();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let version = src.resolve("pkg").await.unwrap();
         assert_eq!(version, "2.0.0");
     }
 
-    #[test]
-    fn test_resolve_fallback_highest_semver_no_dist_tags() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_fallback_highest_semver_no_dist_tags() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let body = serde_json::json!({
             "versions": {
@@ -188,25 +421,27 @@ mod tests {
             .mock("GET", "/naked")
             .with_status(200)
             .with_body(body.to_string())
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let version = src.resolve("naked").unwrap();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let version = src.resolve("naked").await.unwrap();
         assert_eq!(version, "3.0.0");
     }
 
-    #[test]
-    fn test_fetch_tarball_with_prerelease() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_fetch_tarball_with_prerelease() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
 
         let _mock = server
             .mock("GET", "/next/-/next-16.3.0-canary.41.tgz")
             .with_status(200)
             .with_body(b"fake-next-tarball")
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(url.to_string()).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "next".to_string(),
@@ -214,13 +449,13 @@ mod tests {
             content_hash: None,
             requested_ref: None,
         };
-        let result = src.fetch(&identity).unwrap();
+        let result = src.fetch(&identity).await.unwrap();
         assert_eq!(result, b"fake-next-tarball");
     }
 
-    #[test]
-    fn test_resolve_scoped_package() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_resolve_scoped_package() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let body = serde_json::json!({
             "dist-tags": { "latest": "2.0.13" },
@@ -234,16 +469,17 @@ mod tests {
             .mock("GET", "/@types/mdx")
             .with_status(200)
             .with_body(body.to_string())
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
-        let version = src.resolve("@types/mdx").unwrap();
+        let src = RegistrySource::new(url.to_string()).unwrap();
+        let version = src.resolve("@types/mdx").await.unwrap();
         assert_eq!(version, "2.0.13");
     }
 
-    #[test]
-    fn test_fetch_scoped_package_tarball() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_fetch_scoped_package_tarball() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
 
         // Scoped tarball URL uses bare name: mdx-2.0.13.tgz (not @types/mdx-2.0.13.tgz)
@@ -251,9 +487,10 @@ mod tests {
             .mock("GET", "/@types/mdx/-/mdx-2.0.13.tgz")
             .with_status(200)
             .with_body(b"fake-mdx-tarball")
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(url.to_string()).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "@types/mdx".to_string(),
@@ -261,13 +498,13 @@ mod tests {
             content_hash: None,
             requested_ref: None,
         };
-        let result = src.fetch(&identity).unwrap();
+        let result = src.fetch(&identity).await.unwrap();
         assert_eq!(result, b"fake-mdx-tarball");
     }
 
-    #[test]
-    fn test_fetch_tarball() {
-        let mut server = mockito::Server::new();
+    #[tokio::test]
+    async fn test_fetch_tarball() {
+        let mut server = mockito::Server::new_async().await;
         let url = server.url();
         let tarball = b"fake-tarball-content";
 
@@ -278,9 +515,10 @@ mod tests {
             )
             .with_status(200)
             .with_body(tarball)
-            .create();
+            .create_async()
+            .await;
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(url.to_string()).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "zod".to_string(),
@@ -288,8 +526,8 @@ mod tests {
             content_hash: None,
             requested_ref: None,
         };
-        let result = src.fetch(&identity).unwrap();
+        let result = src.fetch(&identity).await.unwrap();
         assert_eq!(result, tarball);
-        mock.assert();
+        mock.assert_async().await;
     }
 }

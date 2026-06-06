@@ -1,6 +1,6 @@
 [package]
 name = "ara"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "A dependency manager with built-in security analysis"
 license = "MIT"
@@ -19,7 +19,7 @@ hex = "0.4"
 toml = "0.8"
 regex = "1"
 walkdir = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tar = "0.4"
 flate2 = "1"
 tempfile = "3"
@@ -28,6 +28,8 @@ clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 chrono = { version = "0.4", features = ["clock"] }
 semver = { version = "1", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
 
 [features]
 nightly-bench = []
