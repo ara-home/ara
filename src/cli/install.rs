@@ -1361,17 +1361,21 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     // Connect resolve(): enhance each node's version from registry sources
     let t_resolve = Instant::now();
-    for node in &mut graph.nodes {
-        if let Some(dep) = find_dep(&m.deps, &node.name) {
-            if let Ok(src) = create_source(node.source, dep) {
-                if let Ok(version_str) = src.resolve(&node.name) {
-                    if let Ok(parsed) = Version::parse(&version_str) {
-                        node.version = parsed;
+    let dep_lookup: HashMap<&str, &crate::manifest::types::DependencyEntry> =
+        m.deps.iter().map(|d| (d.name.as_str(), d)).collect();
+    io_pool().install(|| {
+        graph.nodes.par_iter_mut().for_each(|node| {
+            if let Some(dep) = dep_lookup.get(node.name.as_str()).copied() {
+                if let Ok(src) = create_source(node.source, dep) {
+                    if let Ok(version_str) = src.resolve(&node.name) {
+                        if let Ok(parsed) = Version::parse(&version_str) {
+                            node.version = parsed;
+                        }
                     }
                 }
             }
-        }
-    }
+        });
+    });
     eprintln!(
         "  [profile] resolve versions ({} nodes): {:?}",
         graph.nodes.len(),
