@@ -84,7 +84,7 @@ fn create_source(
             let url = dep.url.as_deref().unwrap_or(&default_url);
             Source::Registry(crate::source::registry::RegistrySource::new(
                 url.to_string(),
-            ))
+            )?)
         }
         SourceType::Github => {
             let repo = dep
@@ -367,31 +367,6 @@ fn collect_installed_names(node_modules: &Path) -> Vec<String> {
     names
 }
 
-fn read_deps_from_package_json(node_modules: &Path, pkg_name: &str) -> Vec<(String, String)> {
-    let pkg_json = node_modules.join(pkg_name).join("package.json");
-    let content = match std::fs::read_to_string(&pkg_json) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let pkg: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut deps = Vec::new();
-    let dep_sources = ["dependencies", "peerDependencies", "optionalDependencies"];
-    for key in &dep_sources {
-        if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
-            for (name, ver) in map {
-                if let Some(ver_str) = ver.as_str() {
-                    deps.push((name.clone(), ver_str.to_string()));
-                }
-            }
-        }
-    }
-    deps
-}
-
 fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
@@ -401,109 +376,112 @@ fn install_transitive_deps(
 ) -> Result<()> {
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+    let reg = crate::source::registry::RegistrySource::new(registry_url)?;
 
-    // Seed the queue with packages that need scanning (deps of these will be discovered).
-    // First, add packages just installed by the caller.
-    // Also scan pre-existing packages in node_modules once.
+    // Pre-populate resolution from packages already known to be installed
+    let mut resolution: HashMap<String, String> = HashMap::new();
+    for entry in &*pkg_entries {
+        resolution.insert(entry.name.clone(), entry.version.clone());
+    }
+
+    // Seed the queue: initial packages + pre-existing node_modules
     let existing = collect_installed_names(node_modules);
-    let mut to_scan: Vec<String> = initial_packages
+    let mut pending: Vec<String> = initial_packages
         .iter()
         .chain(existing.iter())
-        .filter(|n| !n.is_empty())
+        .filter(|n| !n.is_empty() && !resolution.contains_key(*n))
         .cloned()
         .collect();
-    let mut seen: HashSet<String> = to_scan.iter().cloned().collect();
+    let mut seen: HashSet<String> = resolution
+        .keys()
+        .cloned()
+        .chain(pending.iter().cloned())
+        .collect();
 
-    while !to_scan.is_empty() {
-        // Discover dependencies of the current batch by reading package.json files
-        let mut transitive_needs: Vec<(String, String)> = to_scan
+    // =============================================
+    // Phase 1: Build complete resolution map from npm metadata.
+    // No tarballs are downloaded — only cached metadata requests.
+    // =============================================
+    while !pending.is_empty() {
+        let batch: Vec<String> = std::mem::take(&mut pending);
+
+        let discovered: Vec<(String, String)> = batch
             .par_iter()
-            .flat_map(|pkg_name| read_deps_from_package_json(node_modules, pkg_name))
-            .collect();
-        to_scan.clear();
+            .filter_map(|name| {
+                let mut found: Vec<(String, String)> = Vec::new();
+                let exact_ver = resolution.get(name)?;
 
-        if transitive_needs.is_empty() {
-            break;
-        }
+                // Read deps from registry metadata (disk-cached, no tarball)
+                let (deps, peers, optional) = reg.get_deps_for_version(name, exact_ver).ok()?;
 
-        // Deduplicate and skip already-installed packages
-        let mut dedup = HashSet::new();
-        transitive_needs
-            .retain(|(name, _)| dedup.insert(name.clone()) && !node_modules.join(name).exists());
-
-        let results: Vec<_> = transitive_needs
-            .par_iter()
-            .filter_map(|(dep_name, dep_ver_str)| {
-                let dep_dir = node_modules.join(dep_name);
-                if dep_dir.exists() {
-                    return None;
-                }
-
-                let reg = crate::source::registry::RegistrySource::new(registry_url.clone());
-                let resolved_ver = match reg.resolve_matching(dep_name, dep_ver_str) {
-                    Ok(v) => v,
-                    Err(_) => match reg.resolve(dep_name) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("    warning: cannot resolve {}: {}", dep_name, e);
-                            return None;
-                        }
-                    },
-                };
-                let parsed_ver = match Version::parse(&resolved_ver) {
-                    Ok(v) => v,
-                    Err(_) => return None,
-                };
-
-                let identity = PackageIdentity {
-                    source: SourceType::Npm,
-                    name: dep_name.clone(),
-                    version: parsed_ver.clone(),
-                    content_hash: None,
-                    requested_ref: None,
-                };
-
-                let short_ver = format!(
-                    "{}.{}.{}",
-                    parsed_ver.major, parsed_ver.minor, parsed_ver.patch
-                );
-                let cache_key = format!("npm:{}@{}", dep_name, short_ver);
-
-                let cache_lookup = {
-                    let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                    idx.get(&cache_key).cloned()
-                };
-
-                let hash_str = if let Some(cached_hash) = cache_lookup {
-                    if store.contains(&cached_hash) {
-                        println!("    using cached {}@{}", dep_name, short_ver);
-                        cached_hash
-                    } else {
-                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.remove(&cache_key);
-                        match reg.fetch(&identity) {
-                            Ok(content) => {
-                                let hash = match store.put(&content) {
-                                    Ok(h) => h,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "    warning: failed to store {}: {}",
-                                            dep_name, e
-                                        );
-                                        return None;
-                                    }
-                                };
-                                idx.insert(cache_key, hash.clone());
-                                hash
-                            }
-                            Err(e) => {
-                                eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
-                                return None;
-                            }
-                        }
+                for (dep_name, dep_range) in deps.iter().chain(peers.iter()).chain(optional.iter())
+                {
+                    if resolution.contains_key(dep_name) || node_modules.join(dep_name).exists() {
+                        continue;
                     }
+                    if let Ok((resolved_ver, _, _, _)) =
+                        reg.resolve_and_get_deps(dep_name, dep_range)
+                    {
+                        found.push((dep_name.clone(), resolved_ver));
+                    }
+                }
+                Some(found)
+            })
+            .flatten()
+            .collect();
+
+        let mut new_pending: Vec<String> = Vec::new();
+        for (name, ver) in discovered {
+            if seen.insert(name.clone()) {
+                resolution.insert(name.clone(), ver);
+                new_pending.push(name);
+            }
+        }
+        pending = new_pending;
+    }
+
+    // =============================================
+    // Phase 2: Fetch tarballs + extract in one parallel batch.
+    // =============================================
+    let results: Vec<_> = resolution
+        .par_iter()
+        .filter_map(|(dep_name, exact_ver)| {
+            let dep_dir = node_modules.join(dep_name);
+            if dep_dir.exists() {
+                return None;
+            }
+
+            let parsed_ver = match Version::parse(exact_ver) {
+                Ok(v) => v,
+                Err(_) => return None,
+            };
+
+            let identity = PackageIdentity {
+                source: SourceType::Npm,
+                name: dep_name.clone(),
+                version: parsed_ver.clone(),
+                content_hash: None,
+                requested_ref: None,
+            };
+
+            let short_ver = format!(
+                "{}.{}.{}",
+                parsed_ver.major, parsed_ver.minor, parsed_ver.patch
+            );
+            let cache_key = format!("npm:{}@{}", dep_name, short_ver);
+
+            let cache_lookup = {
+                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                idx.get(&cache_key).cloned()
+            };
+
+            let hash_str = if let Some(cached_hash) = cache_lookup {
+                if store.contains(&cached_hash) {
+                    println!("    using cached {}@{}", dep_name, short_ver);
+                    cached_hash
                 } else {
                     let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                    idx.remove(&cache_key);
                     match reg.fetch(&identity) {
                         Ok(content) => {
                             let hash = match store.put(&content) {
@@ -521,42 +499,58 @@ fn install_transitive_deps(
                             return None;
                         }
                     }
-                };
-
-                if let Err(e) = extract_package_cached(store, &hash_str, &dep_dir) {
-                    eprintln!("    failed to extract {}: {}", dep_name, e);
-                    return None;
                 }
-
-                if let Err(e) = install_bin_links(node_modules, dep_name, &dep_dir) {
-                    eprintln!(
-                        "    warning: failed to create bin links for {}: {}",
-                        dep_name, e
-                    );
+            } else {
+                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
+                match reg.fetch(&identity) {
+                    Ok(content) => {
+                        let hash = match store.put(&content) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                eprintln!("    warning: failed to store {}: {}", dep_name, e);
+                                return None;
+                            }
+                        };
+                        idx.insert(cache_key, hash.clone());
+                        hash
+                    }
+                    Err(e) => {
+                        eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                        return None;
+                    }
                 }
+            };
 
-                Some((dep_name.clone(), short_ver, hash_str))
-            })
-            .collect();
-
-        for (dep_name, short_ver, hash_str) in &results {
-            pkg_entries.push(PackageEntry {
-                name: dep_name.clone(),
-                version: short_ver.clone(),
-                source: "npm".to_string(),
-                package_hash: hash_str.clone(),
-                integrity: None,
-                signature: None,
-                repository: None,
-                commit: None,
-                dependencies: None,
-                security: None,
-                sbom: None,
-            });
-            if seen.insert(dep_name.clone()) {
-                to_scan.push(dep_name.clone());
+            if let Err(e) = extract_package_cached(store, &hash_str, &dep_dir) {
+                eprintln!("    failed to extract {}: {}", dep_name, e);
+                return None;
             }
-        }
+
+            if let Err(e) = install_bin_links(node_modules, dep_name, &dep_dir) {
+                eprintln!(
+                    "    warning: failed to create bin links for {}: {}",
+                    dep_name, e
+                );
+            }
+
+            Some((dep_name.clone(), short_ver, hash_str))
+        })
+        .collect();
+
+    for (dep_name, short_ver, hash_str) in &results {
+        pkg_entries.push(PackageEntry {
+            name: dep_name.clone(),
+            version: short_ver.clone(),
+            source: "npm".to_string(),
+            package_hash: hash_str.clone(),
+            integrity: None,
+            signature: None,
+            repository: None,
+            commit: None,
+            dependencies: None,
+            security: None,
+            sbom: None,
+        });
     }
 
     Ok(())
@@ -930,7 +924,7 @@ fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
         SourceType::Npm | SourceType::Registry => {
             let registry_url = std::env::var("ARA_NPM_REGISTRY")
                 .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
-            let reg = crate::source::registry::RegistrySource::new(registry_url);
+            let reg = crate::source::registry::RegistrySource::new(registry_url)?;
             let identity = PackageIdentity {
                 source: SourceType::Npm,
                 name: meta.name.clone(),
@@ -993,7 +987,7 @@ fn resolve_npm_meta(
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
 
-    let reg = crate::source::registry::RegistrySource::new(registry_url);
+    let reg = crate::source::registry::RegistrySource::new(registry_url)?;
 
     let (resolved_ver_str, manifest_ver) = if let Some(v) = version {
         let trimmed = v

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,14 +8,20 @@ use crate::util::http::HttpClient;
 
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
+type DepMap = HashMap<String, String>;
+
 pub struct RegistrySource {
     pub registry_url: String,
+    client: HttpClient,
 }
 
 impl RegistrySource {
-    #[must_use]
-    pub const fn new(registry_url: String) -> Self {
-        Self { registry_url }
+    pub fn new(registry_url: String) -> Result<Self, SourceError> {
+        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        Ok(Self {
+            registry_url,
+            client,
+        })
     }
 
     /// Fetch package metadata from the registry, using a local disk cache
@@ -28,9 +35,9 @@ impl RegistrySource {
             }
         }
 
-        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let url = format!("{}/{name}", self.registry_url);
-        let body = client
+        let body = self
+            .client
             .get(&url)
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
 
@@ -167,7 +174,6 @@ impl RegistrySource {
     }
 
     pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
-        let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let ver_str = identity.version.to_string();
         // For scoped packages (@scope/name), the tarball filename uses only the bare name
         let bare_name = identity.name.rsplit('/').next().unwrap_or(&identity.name);
@@ -176,10 +182,110 @@ impl RegistrySource {
             self.registry_url,
             name = identity.name
         );
-        let body = client
+        let body = self
+            .client
             .get(&tarball_url)
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
+    }
+
+    /// Resolve the exact version matching a constraint, then return that
+    /// version's dependency declarations from the registry metadata.
+    /// Returns (exact_version, dependencies, peer_dependencies, optional_dependencies).
+    pub fn resolve_and_get_deps(
+        &self,
+        name: &str,
+        constraint_str: &str,
+    ) -> Result<(String, DepMap, DepMap, DepMap), SourceError> {
+        let parsed = self.fetch_metadata(name)?;
+
+        let constraint =
+            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
+
+        let versions = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .ok_or(SourceError::PackageNotFound)?;
+
+        // Find best matching version
+        let mut best: Option<&serde_json::Value> = None;
+        let mut best_ver: Option<String> = None;
+        for (ver_str, ver_data) in versions {
+            if let Ok(ver) = Version::parse(ver_str) {
+                if constraint.satisfied_by(&ver) {
+                    match &best_ver {
+                        Some(ref current) => {
+                            if let Ok(current_ver) = Version::parse(current) {
+                                if ver > current_ver {
+                                    best = Some(ver_data);
+                                    best_ver = Some(ver_str.clone());
+                                }
+                            }
+                        }
+                        None => {
+                            best = Some(ver_data);
+                            best_ver = Some(ver_str.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let ver_str = best_ver.ok_or(SourceError::VersionNotFound)?;
+        let ver_data = best.ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            ver_str,
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
+    }
+
+    /// Given an exact package name and version, read its dependency
+    /// declarations from the registry metadata (no resolution needed).
+    pub fn get_deps_for_version(
+        &self,
+        name: &str,
+        version_str: &str,
+    ) -> Result<(DepMap, DepMap, DepMap), SourceError> {
+        let parsed = self.fetch_metadata(name)?;
+
+        let ver_data = parsed
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get(version_str))
+            .ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
     }
 }
 
@@ -206,7 +312,7 @@ mod tests {
             .with_body(body.to_string())
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let version = src.resolve("zod").unwrap();
         assert_eq!(version, "2.0.0");
         mock.assert();
@@ -218,7 +324,7 @@ mod tests {
         let url = server.url();
         let mock = server.mock("GET", "/missing").with_status(404).create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let err = src.resolve("missing").unwrap_err();
         assert!(matches!(err, SourceError::NetworkError(_)));
         mock.assert();
@@ -234,7 +340,7 @@ mod tests {
             .with_body("this is not json")
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let err = src.resolve("bad").unwrap_err();
         assert!(matches!(err, SourceError::PackageNotFound));
     }
@@ -251,7 +357,7 @@ mod tests {
             .with_body(body.to_string())
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let err = src.resolve("empty").unwrap_err();
         assert!(matches!(err, SourceError::VersionNotFound));
     }
@@ -275,7 +381,7 @@ mod tests {
             .with_body(body.to_string())
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let version = src.resolve("pkg").unwrap();
         assert_eq!(version, "2.0.0");
     }
@@ -298,7 +404,7 @@ mod tests {
             .with_body(body.to_string())
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let version = src.resolve("naked").unwrap();
         assert_eq!(version, "3.0.0");
     }
@@ -314,7 +420,7 @@ mod tests {
             .with_body(b"fake-next-tarball")
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "next".to_string(),
@@ -344,7 +450,7 @@ mod tests {
             .with_body(body.to_string())
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let version = src.resolve("@types/mdx").unwrap();
         assert_eq!(version, "2.0.13");
     }
@@ -361,7 +467,7 @@ mod tests {
             .with_body(b"fake-mdx-tarball")
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "@types/mdx".to_string(),
@@ -388,7 +494,7 @@ mod tests {
             .with_body(tarball)
             .create();
 
-        let src = RegistrySource::new(format!("{url}"));
+        let src = RegistrySource::new(format!("{url}")).unwrap();
         let identity = crate::types::PackageIdentity {
             source: crate::types::SourceType::Npm,
             name: "zod".to_string(),
