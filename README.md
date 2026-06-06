@@ -186,6 +186,17 @@ Flags:
 | `--refresh` | Re-fetch for mutable references (branches, tags) |
 | `--offline` | Fail if package is not in cache |
 
+### `ara x <package> [args...]` (Execute packages)
+
+Execute a package binary on the fly without modifying your project's manifest, similar to `npx` or `pnpm dlx`. Ara downloads the package to an isolated temporary directory, resolves its dependencies, finds its binary, and executes it securely. The temporary environment is automatically cleaned up after execution.
+
+```bash
+ara x create-next-app my-app         # Run create-next-app
+ara x shadcn init --preset bdvw9FeS  # Pass arguments to the package
+```
+
+By default, the command runs under the `open` sandbox profile so it can interact with your local filesystem and the network (necessary for scaffolding tools like `create-next-app`).
+
 ### `ara run <script> --profile <profile>`
 
 Run a script defined in `ara.toml` under a sandbox profile.

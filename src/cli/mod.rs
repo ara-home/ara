@@ -6,6 +6,7 @@ mod gc;
 pub(crate) mod install;
 mod prompt;
 mod run;
+mod x;
 
 #[derive(Parser)]
 #[command(name = "ara", version = crate::version::VERSION, about = "Ara package manager")]
@@ -72,6 +73,14 @@ pub enum Commands {
         offline: bool,
         #[arg(long)]
         non_interactive: bool,
+    },
+    /// Execute a package binary (like npx or pnpm dlx)
+    X {
+        /// Package to execute (e.g. create-next-app@latest)
+        package: String,
+        /// Arguments to pass to the package
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Run a script in a sandboxed environment
     Run {
@@ -154,6 +163,7 @@ impl Cli {
                 )
                 .await
             }
+            Commands::X { package, args } => x::cmd_x(package, args).await,
             Commands::Run { script, profile } => run::cmd_run(script, profile),
             Commands::Analyze { path } => analyze::cmd_analyze(path),
             Commands::Audit { path } => analyze::cmd_audit(path),

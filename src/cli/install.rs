@@ -308,7 +308,11 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 
     let bin_entries: Vec<(String, String)> = match pkg.get("bin") {
         Some(serde_json::Value::String(cmd)) => {
-            let unscoped_name = pkg_name.split('/').last().unwrap_or(pkg_name).to_string();
+            let unscoped_name = pkg_name
+                .split('/')
+                .next_back()
+                .unwrap_or(pkg_name)
+                .to_string();
             vec![(unscoped_name, cmd.clone())]
         }
         Some(serde_json::Value::Object(map)) => map
