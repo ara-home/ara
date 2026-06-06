@@ -80,7 +80,7 @@ src/
 
 #### Manifest install (`ara install` with no args)
 
-1. **Parse** the manifest — reads `ara.toml` by default, or auto-detects `package.json` (generating `ara.toml` transparently)
+1. **Parse** the manifest — reads `package.json` as the primary source for dependencies and scripts, and merges advanced settings from `ara.toml` if it exists.
 2. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
 3. **Fetch** tarballs from the appropriate source backend (registry, git, GitHub, local, workspace)
 4. **Analyze** every fetched package by scanning its source files against 16+ security patterns
@@ -97,8 +97,8 @@ src/
 5. **Analyze** the package by scanning source files for suspicious patterns
 6. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
 7. **Extract** to `node_modules/` and store in the content-addressable store
-8. **Bootstrap** a minimal `ara.toml` if no manifest exists
-9. **Write** the updated manifest and `ara.lock`
+8. **Update** `package.json` with the newly installed packages.
+9. **Write** the `ara.lock` file.
 
 ### The analysis engine
 
@@ -134,7 +134,7 @@ Each finding produces a structured report. Findings are deduplicated per file an
 
 ### `ara install`
 
-Install all dependencies from `ara.toml` or `package.json`. If only `package.json` is found, Ara reads it natively and generates an `ara.toml` automatically. Resolves versions, fetches tarballs, scans for security issues, and writes `ara.lock`.
+Install all dependencies from `package.json`. Ara reads it natively as the primary source of truth, optionally merging advanced configurations (like security rules) from `ara.toml`. Resolves versions, fetches tarballs, scans for security issues, and writes `ara.lock`.
 
 ```bash
 ara install                    # Interactive — prompts for suspicious packages
@@ -223,29 +223,25 @@ Garbage-collect the content-addressable store (remove orphaned objects).
 
 ## Manifest format
 
-Ara supports two manifest formats: `ara.toml` (native) and `package.json` (via auto-detection).
+Ara embraces a **hybrid manifest architecture** to maximize compatibility with the broader JavaScript ecosystem while maintaining its advanced capabilities:
 
-### `ara.toml`
+- **`package.json`**: The absolute source of truth for your project identity, dependencies, devDependencies, scripts, and workspaces.
+- **`ara.toml`**: An optional configuration file used strictly for Ara's advanced features, like security policies and hermetic build profiles.
 
-```toml
-[project]
-name = "my-app"
-version = "0.1.0"
+### `package.json` (Primary Manifest)
 
-[dependencies]
-zod = "^3.23.0"
-react = "18.2.0"
-lodash = { source = "npm", version = "4.17.21" }
-my-lib = { source = "workspace" }
-utils = { source = "local", path = "../utils" }
-cli-tool = { source = "github", repo = "user/cli-tool" }
-patcher = { source = "git", url = "https://github.com/user/patcher.git", commit = "abc123" }
+Ara reads `package.json` natively. When you run `ara install react`, Ara will write the dependency directly to your `package.json`, just like npm or Yarn. All standard fields are mapped and respected:
 
-[workspace]
-members = ["packages/*"]
-```
+- `name` and `version`
+- `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`
+- `scripts`
+- `workspaces`
 
-### Security options
+### `ara.toml` (Advanced Configuration)
+
+You only need an `ara.toml` if you want to enforce security thresholds or sandbox profiles. It does not store dependencies or scripts.
+
+#### Security options
 
 ```toml
 [security]
@@ -253,38 +249,13 @@ risk_threshold = "high"       # Only warn on High+ findings (low, medium, high, 
 require_review = true          # Always prompt for review
 ```
 
-### Build options
+#### Build options
 
 ```toml
 [build]
 hermetic = true               # Run build in hermetic sandbox
 offline_first = true           # Prefer local cache over network
 ```
-
-### Scripts
-
-```toml
-[scripts]
-build = "tsc"
-test = "vitest run"
-start = "node dist/index.js"
-```
-
-### `package.json` (auto-detected)
-
-Ara reads `package.json` natively when no `ara.toml` is present. All standard fields are mapped:
-
-| package.json field | ara.toml equivalent |
-|---|---|
-| `name` + `version` | `[project]` |
-| `dependencies` | `[deps]` with `kind = "prod"` |
-| `devDependencies` | `[deps]` with `kind = "dev"` |
-| `peerDependencies` | `[deps]` with `kind = "peer"` |
-| `optionalDependencies` | `[deps]` with `kind = "optional"` |
-| `scripts` | `[scripts]` |
-| `workspaces` | `[workspace]` members |
-
-When consumed, Ara generates an `ara.toml` transparently — no explicit migration command required. Non-mapped fields (`main`, `bin`, `exports`, `engines`, etc.) are preserved and re-emitted when generating `package.json` from `ara.toml`.
 
 ---
 
@@ -341,7 +312,7 @@ The seccomp-BPF sandbox is Linux-specific and only supports x86_64 syscall numbe
 
 ### npm ecosystem compatibility gap
 
-Ara reads `package.json` natively and auto-generates `ara.toml`, so existing npm projects work out of the box. However, there is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import — Ara uses its own `ara.lock` format.
+Ara uses `package.json` as the primary source of truth for dependencies and scripts, so existing npm projects work out of the box with zero migration effort. However, there is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import — Ara resolves the tree from scratch and uses its own `ara.lock` format.
 
 ### No private registry support
 

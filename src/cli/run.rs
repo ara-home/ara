@@ -39,18 +39,31 @@ fn read_manifest(cwd: &Path) -> Result<crate::manifest::types::Manifest> {
     let manifest_path = cwd.join("ara.toml");
     let pkg_json_path = cwd.join("package.json");
 
-    if manifest_path.exists() {
-        let content = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        let m = crate::manifest::parser::parse(&content).context("failed to parse ara.toml")?;
-        return Ok(m);
-    }
+    let mut final_manifest: Option<crate::manifest::types::Manifest> = None;
 
     if pkg_json_path.exists() {
         let content = std::fs::read_to_string(&pkg_json_path)
             .with_context(|| format!("failed to read {}", pkg_json_path.display()))?;
         let m = crate::manifest::package_json::parse_package_json(&content)
             .context("failed to parse package.json")?;
+        final_manifest = Some(m);
+    }
+
+    if manifest_path.exists() {
+        let content = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let m = crate::manifest::parser::parse(&content).context("failed to parse ara.toml")?;
+
+        if let Some(mut fm) = final_manifest {
+            fm.security = m.security;
+            fm.build = m.build;
+            final_manifest = Some(fm);
+        } else {
+            final_manifest = Some(m);
+        }
+    }
+
+    if let Some(m) = final_manifest {
         return Ok(m);
     }
 
