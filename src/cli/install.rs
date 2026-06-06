@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
@@ -390,13 +390,87 @@ fn io_pool() -> &'static rayon::ThreadPool {
 }
 
 /// Extract and sort all version strings from package metadata.
-fn extract_versions(meta: &serde_json::Value) -> Vec<Version> {
-    let mut versions: Vec<Version> = meta["versions"]
-        .as_object()
-        .map(|v| v.keys().filter_map(|s| Version::parse(s).ok()).collect())
-        .unwrap_or_default();
-    versions.sort();
-    versions
+/// Compact extracted metadata: only versions + dependency maps,
+/// avoids storing the full npm registry response (30MB+ for next.js).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PackageMeta {
+    versions: Vec<String>,
+    deps: HashMap<String, HashMap<String, String>>,
+}
+
+fn registry_cache_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".ara")
+            .join("cache")
+            .join("registry"),
+    )
+}
+
+fn read_package_meta(name: &str) -> Option<PackageMeta> {
+    let dir = registry_cache_dir()?;
+    let safe_name = name.replace('/', "_").replace('@', "");
+    let path = dir.join(format!("{safe_name}.json"));
+    if !path.exists() {
+        return None;
+    }
+    let metadata = std::fs::metadata(&path).ok()?;
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(elapsed) = modified.elapsed() {
+            if elapsed > Duration::from_secs(604800) {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+        }
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    serde_json::from_reader(reader).ok()
+}
+
+fn write_package_meta(name: &str, meta: &PackageMeta) {
+    let dir = match registry_cache_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let safe_name = name.replace('/', "_").replace('@', "");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("  warning: failed to create registry cache dir: {e}");
+        return;
+    }
+    let path = dir.join(format!("{safe_name}.json"));
+    let file = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let writer = std::io::BufWriter::new(file);
+    let _ = serde_json::to_writer(writer, meta);
+}
+
+/// Extract sorted versions + dependency map from full npm metadata JSON.
+fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
+    let versions_map = meta["versions"].as_object().cloned().unwrap_or_default();
+    let mut versions: Vec<String> = versions_map.keys().cloned().collect();
+    versions.sort_by(|a, b| {
+        let va = Version::parse(a);
+        let vb = Version::parse(b);
+        match (va, vb) {
+            (Ok(va), Ok(vb)) => va.cmp(&vb),
+            _ => a.cmp(b),
+        }
+    });
+    let mut deps: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (ver_str, ver_data) in versions_map {
+        if let Some(dep_map) = ver_data["dependencies"].as_object() {
+            let deps_map: HashMap<String, String> = dep_map
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect();
+            deps.insert(ver_str.clone(), deps_map);
+        }
+    }
+    PackageMeta { versions, deps }
 }
 
 fn install_transitive_deps(
@@ -428,59 +502,57 @@ fn install_transitive_deps(
         .collect();
 
     // =============================================
-    // Phase 1: Build complete resolution map from npm metadata.
+    // Phase 1: Build complete resolution map from compact package metadata.
     //
-    // Uses a dedicated I/O pool + in-memory metadata cache to avoid
-    // redundant HTTP requests for packages whose metadata was already
-    // fetched in a prior level.
-    //
-    // Within each level, deps are:
-    //   1. Fetch metadata (parallel, cached in memory)
-    //   2. Extract dependency declarations from cached metadata (sequential)
-    //   3. Fetch metadata for new deps (parallel, cached in memory)
-    //   4. Resolve versions from cached metadata (sequential)
+    // Uses compact PackageMeta (versions + deps only) instead of storing
+    // the full npm registry response (30MB+ for next.js).
     // =============================================
     let t_resolution = Instant::now();
     let mut level_count = 0u32;
-    let mut meta_cache: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut meta_versions: HashMap<String, Vec<Version>> = HashMap::new();
+    let mut meta_cache: HashMap<String, PackageMeta> = HashMap::new();
+    let mut t_fetch = Duration::ZERO;
+    let mut t_resolve = Duration::ZERO;
     while !pending.is_empty() {
         level_count += 1;
         let batch: Vec<String> = std::mem::take(&mut pending);
 
-        // 1a. Fetch metadata for any batch packages not yet in memory cache,
-        //     pre-extract sorted versions for fast constraint resolution.
+        // 1a. Fetch compact metadata for uncached batch packages
         let batch_uncached: Vec<String> = batch
             .iter()
             .filter(|n| !meta_cache.contains_key(*n))
             .cloned()
             .collect();
         if !batch_uncached.is_empty() {
-            let fetched: Vec<(String, serde_json::Value)> = io_pool().install(|| {
+            let t0 = Instant::now();
+            let fetched: Vec<(String, PackageMeta)> = io_pool().install(|| {
                 batch_uncached
                     .par_iter()
                     .filter_map(|name| {
                         let _exact_ver = resolution.get(name)?;
-                        reg.fetch_metadata(name)
-                            .ok()
-                            .map(|meta| (name.clone(), meta))
+                        // Try compact cache first, fall back to full metadata
+                        if let Some(pm) = read_package_meta(name) {
+                            return Some((name.clone(), pm));
+                        }
+                        let meta = reg.fetch_metadata(name).ok()?;
+                        let pm = extract_package_meta(&meta);
+                        write_package_meta(name, &pm);
+                        Some((name.clone(), pm))
                     })
                     .collect()
             });
-            for (name, meta) in fetched {
-                meta_versions.insert(name.clone(), extract_versions(&meta));
-                meta_cache.insert(name, meta);
+            t_fetch += t0.elapsed();
+            for (name, pm) in fetched {
+                meta_cache.insert(name, pm);
             }
         }
 
-        // 1b. Extract deps for all batch packages from cached metadata
+        // 1b. Extract deps for all batch packages from compact cache
         let dep_lists: Vec<Vec<(String, String)>> = batch
             .iter()
             .filter_map(|name| {
                 let exact_ver = resolution.get(name)?;
-                let meta = meta_cache.get(name)?;
-                let (deps, _peers, _optional) =
-                    reg.get_deps_for_version_from_meta(meta, exact_ver).ok()?;
+                let pm = meta_cache.get(name)?;
+                let deps = pm.deps.get(exact_ver).cloned().unwrap_or_default();
                 let all: Vec<(String, String)> = deps.into_iter().collect();
                 if all.is_empty() {
                     None
@@ -503,39 +575,56 @@ fn install_transitive_deps(
             .cloned()
             .collect();
 
-        // 3a. Fetch metadata for new deps + pre-extract versions
+        // 3a. Fetch compact metadata for new deps
         let dep_uncached: Vec<String> = unique_deps
             .iter()
             .map(|(name, _)| name.clone())
             .filter(|n| !meta_cache.contains_key(n))
             .collect();
         if !dep_uncached.is_empty() {
-            let fetched: Vec<(String, serde_json::Value)> = io_pool().install(|| {
+            let t0 = Instant::now();
+            let fetched: Vec<(String, PackageMeta)> = io_pool().install(|| {
                 dep_uncached
                     .par_iter()
                     .filter_map(|name| {
+                        if let Some(pm) = read_package_meta(name) {
+                            return Some((name.clone(), pm));
+                        }
                         let meta = reg.fetch_metadata(name).ok()?;
-                        Some((name.clone(), meta))
+                        let pm = extract_package_meta(&meta);
+                        write_package_meta(name, &pm);
+                        Some((name.clone(), pm))
                     })
                     .collect()
             });
-            for (name, meta) in fetched {
-                meta_versions.insert(name.clone(), extract_versions(&meta));
-                meta_cache.insert(name, meta);
+            t_fetch += t0.elapsed();
+            for (name, pm) in fetched {
+                meta_cache.insert(name, pm);
             }
         }
 
-        // 3b. Resolve versions for unique deps using cached sorted versions
+        // 3b. Resolve versions using compact sorted version list
+        let t1 = Instant::now();
         let discovered: Vec<(String, String)> = unique_deps
             .iter()
             .filter_map(|(dep_name, dep_range)| {
-                let versions = meta_versions.get(dep_name)?;
+                let pm = meta_cache.get(dep_name)?;
                 let constraint = Constraint::parse(dep_range).ok()?;
-                let best = versions.iter().rev().find(|v| constraint.satisfied_by(v))?;
-                let ver_str = format!("{}.{}.{}", best.major, best.minor, best.patch);
-                Some((dep_name.clone(), ver_str))
+                // Versions are sorted ascending, find highest matching
+                let best = pm
+                    .versions
+                    .iter()
+                    .rev()
+                    .filter_map(|v| {
+                        Version::parse(v)
+                            .ok()
+                            .filter(|pv| constraint.satisfied_by(pv))
+                    })
+                    .next()?;
+                Some((dep_name.clone(), best.to_string()))
             })
             .collect();
+        t_resolve += t1.elapsed();
 
         // 4. Add newly discovered packages to resolution + pending
         for (name, ver) in discovered {
@@ -548,10 +637,12 @@ fn install_transitive_deps(
         eprintln!("  resolved {} packages...", resolution.len());
     }
     eprintln!(
-        "  [profile] phase 3a resolution ({} levels, {} pkgs): {:?}",
+        "  [profile] phase 3a resolution ({} levels, {} pkgs): {:?} (fetch {:.3}s, resolve {:.3}s)",
         level_count,
         resolution.len(),
-        t_resolution.elapsed()
+        t_resolution.elapsed(),
+        t_fetch.as_secs_f64(),
+        t_resolve.as_secs_f64(),
     );
 
     // =============================================

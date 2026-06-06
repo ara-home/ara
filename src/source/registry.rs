@@ -82,7 +82,14 @@ impl RegistrySource {
             }
         }
         let file = std::fs::File::open(path).ok()?;
-        serde_json::from_reader(file).ok()
+        let reader = std::io::BufReader::new(file);
+        let parsed: serde_json::Value = serde_json::from_reader(reader).ok()?;
+        // Support legacy format: unwrap {"body": metadata} wrapper
+        if parsed.get("body").and_then(|b| b.get("versions")).is_some() {
+            parsed.get("body").cloned()
+        } else {
+            Some(parsed)
+        }
     }
 
     fn write_cached_metadata(name: &str, body: &serde_json::Value) {
@@ -262,37 +269,6 @@ impl RegistrySource {
         let parsed = self.fetch_metadata(name)?;
 
         let ver_data = parsed
-            .get("versions")
-            .and_then(|v| v.as_object())
-            .and_then(|v| v.get(version_str))
-            .ok_or(SourceError::VersionNotFound)?;
-
-        let extract_deps = |key: &str| -> HashMap<String, String> {
-            ver_data
-                .get(key)
-                .and_then(|v| v.as_object())
-                .map(|map| {
-                    map.iter()
-                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        Ok((
-            extract_deps("dependencies"),
-            extract_deps("peerDependencies"),
-            extract_deps("optionalDependencies"),
-        ))
-    }
-
-    /// Extract dependency declarations from pre-fetched metadata for an exact version.
-    pub(crate) fn get_deps_for_version_from_meta(
-        &self,
-        metadata: &serde_json::Value,
-        version_str: &str,
-    ) -> Result<(DepMap, DepMap, DepMap), SourceError> {
-        let ver_data = metadata
             .get("versions")
             .and_then(|v| v.as_object())
             .and_then(|v| v.get(version_str))
