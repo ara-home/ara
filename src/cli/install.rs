@@ -265,17 +265,32 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
 }
 
 fn detect_tarball_prefix(entries: &[TarballEntry]) -> std::path::PathBuf {
+    if entries.is_empty() {
+        return std::path::PathBuf::new();
+    }
+
     let first_comp = entries.first().and_then(|e| e.path.components().next());
+
     let common = first_comp.filter(|comp| {
         entries.iter().all(|e| {
             let mut comps = e.path.components();
-            comps.next() == Some(*comp) && comps.next().is_some()
+            let first = comps.next();
+            // It must match the first component.
+            // If it has NO other components (i.e. it is the directory itself), that's fine.
+            first == Some(*comp)
         })
     });
 
     match common {
-        Some(comp) if comp.as_os_str() == "package" => std::path::PathBuf::from("package"),
-        Some(comp) => std::path::PathBuf::from(comp.as_os_str()),
+        Some(comp) => {
+            // Check if there are actually files inside this directory.
+            let has_files = entries.iter().any(|e| e.path.components().count() > 1);
+            if has_files {
+                std::path::PathBuf::from(comp.as_os_str())
+            } else {
+                std::path::PathBuf::new()
+            }
+        }
         None => std::path::PathBuf::new(),
     }
 }

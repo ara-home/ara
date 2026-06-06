@@ -32,7 +32,7 @@ fn shared_client() -> Result<reqwest::Client, HttpError> {
     );
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
         .user_agent("ara-package-manager/0.1.0")
         .default_headers(headers)
         .build()?;
