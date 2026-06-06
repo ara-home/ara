@@ -1671,6 +1671,14 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         &installed_names,
     )?;
 
+    // Save store index again to persist entries added by install_transitive_deps
+    {
+        let idx = store_index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
+    }
+
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
     let raw = graph.compute_hash()?;
