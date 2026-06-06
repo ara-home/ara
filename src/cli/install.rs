@@ -389,6 +389,16 @@ fn io_pool() -> &'static rayon::ThreadPool {
     })
 }
 
+/// Extract and sort all version strings from package metadata.
+fn extract_versions(meta: &serde_json::Value) -> Vec<Version> {
+    let mut versions: Vec<Version> = meta["versions"]
+        .as_object()
+        .map(|v| v.keys().filter_map(|s| Version::parse(s).ok()).collect())
+        .unwrap_or_default();
+    versions.sort();
+    versions
+}
+
 fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
@@ -433,11 +443,13 @@ fn install_transitive_deps(
     let t_resolution = Instant::now();
     let mut level_count = 0u32;
     let mut meta_cache: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut meta_versions: HashMap<String, Vec<Version>> = HashMap::new();
     while !pending.is_empty() {
         level_count += 1;
         let batch: Vec<String> = std::mem::take(&mut pending);
 
-        // 1a. Fetch metadata for any batch packages not yet in memory cache
+        // 1a. Fetch metadata for any batch packages not yet in memory cache,
+        //     pre-extract sorted versions for fast constraint resolution.
         let batch_uncached: Vec<String> = batch
             .iter()
             .filter(|n| !meta_cache.contains_key(*n))
@@ -456,6 +468,7 @@ fn install_transitive_deps(
                     .collect()
             });
             for (name, meta) in fetched {
+                meta_versions.insert(name.clone(), extract_versions(&meta));
                 meta_cache.insert(name, meta);
             }
         }
@@ -490,7 +503,7 @@ fn install_transitive_deps(
             .cloned()
             .collect();
 
-        // 3a. Fetch metadata for new deps (if not already cached)
+        // 3a. Fetch metadata for new deps + pre-extract versions
         let dep_uncached: Vec<String> = unique_deps
             .iter()
             .map(|(name, _)| name.clone())
@@ -507,19 +520,20 @@ fn install_transitive_deps(
                     .collect()
             });
             for (name, meta) in fetched {
+                meta_versions.insert(name.clone(), extract_versions(&meta));
                 meta_cache.insert(name, meta);
             }
         }
 
-        // 3b. Resolve versions for unique deps from cached metadata
+        // 3b. Resolve versions for unique deps using cached sorted versions
         let discovered: Vec<(String, String)> = unique_deps
             .iter()
             .filter_map(|(dep_name, dep_range)| {
-                let meta = meta_cache.get(dep_name)?;
-                match reg.resolve_and_get_deps_from_meta(meta, dep_range) {
-                    Ok((ver, _, _, _)) => Some((dep_name.clone(), ver)),
-                    Err(_) => None,
-                }
+                let versions = meta_versions.get(dep_name)?;
+                let constraint = Constraint::parse(dep_range).ok()?;
+                let best = versions.iter().rev().find(|v| constraint.satisfied_by(v))?;
+                let ver_str = format!("{}.{}.{}", best.major, best.minor, best.patch);
+                Some((dep_name.clone(), ver_str))
             })
             .collect();
 

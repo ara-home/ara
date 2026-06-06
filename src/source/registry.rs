@@ -81,9 +81,8 @@ impl RegistrySource {
                 }
             }
         }
-        let content = std::fs::read_to_string(path).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-        parsed.get("body").cloned()
+        let file = std::fs::File::open(path).ok()?;
+        serde_json::from_reader(file).ok()
     }
 
     fn write_cached_metadata(name: &str, body: &serde_json::Value) {
@@ -94,8 +93,7 @@ impl RegistrySource {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let cache = serde_json::json!({ "body": body });
-        if let Ok(content) = serde_json::to_string(&cache) {
+        if let Ok(content) = serde_json::to_string(body) {
             let _ = std::fs::write(&path, content);
         }
     }
@@ -313,66 +311,6 @@ impl RegistrySource {
         };
 
         Ok((
-            extract_deps("dependencies"),
-            extract_deps("peerDependencies"),
-            extract_deps("optionalDependencies"),
-        ))
-    }
-
-    /// Resolve the best matching version + extract deps from pre-fetched metadata.
-    pub(crate) fn resolve_and_get_deps_from_meta(
-        &self,
-        metadata: &serde_json::Value,
-        constraint_str: &str,
-    ) -> Result<(String, DepMap, DepMap, DepMap), SourceError> {
-        let constraint =
-            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
-
-        let versions = metadata
-            .get("versions")
-            .and_then(|v| v.as_object())
-            .ok_or(SourceError::PackageNotFound)?;
-
-        let mut best: Option<&serde_json::Value> = None;
-        let mut best_ver: Option<String> = None;
-        for (ver_str, ver_data) in versions {
-            if let Ok(ver) = Version::parse(ver_str) {
-                if constraint.satisfied_by(&ver) {
-                    match &best_ver {
-                        Some(ref current) => {
-                            if let Ok(current_ver) = Version::parse(current) {
-                                if ver > current_ver {
-                                    best = Some(ver_data);
-                                    best_ver = Some(ver_str.clone());
-                                }
-                            }
-                        }
-                        None => {
-                            best = Some(ver_data);
-                            best_ver = Some(ver_str.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        let ver_str = best_ver.ok_or(SourceError::VersionNotFound)?;
-        let ver_data = best.ok_or(SourceError::VersionNotFound)?;
-
-        let extract_deps = |key: &str| -> HashMap<String, String> {
-            ver_data
-                .get(key)
-                .and_then(|v| v.as_object())
-                .map(|map| {
-                    map.iter()
-                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        Ok((
-            ver_str,
             extract_deps("dependencies"),
             extract_deps("peerDependencies"),
             extract_deps("optionalDependencies"),
