@@ -436,12 +436,10 @@ fn install_transitive_deps(
                 .par_iter()
                 .filter_map(|name| {
                     let exact_ver = resolution.get(name)?;
-                    let (deps, peers, optional) = reg.get_deps_for_version(name, exact_ver).ok()?;
-                    let all: Vec<(String, String)> = deps
-                        .into_iter()
-                        .chain(peers.into_iter())
-                        .chain(optional.into_iter())
-                        .collect();
+                    let (deps, peers, _optional) =
+                        reg.get_deps_for_version(name, exact_ver).ok()?;
+                    let all: Vec<(String, String)> =
+                        deps.into_iter().chain(peers.into_iter()).collect();
                     if all.is_empty() {
                         None
                     } else {
@@ -492,7 +490,6 @@ fn install_transitive_deps(
     // reported immediately without waiting for slow ones.
     // =============================================
     let total_resolve = resolution.len();
-    eprintln!("  fetching {} packages", total_resolve);
     let (tx, rx) = std::sync::mpsc::channel::<Option<(String, String, String)>>();
     // Bind shared references so they're Copy in move closures
     let store_ref = store;
@@ -587,7 +584,19 @@ fn install_transitive_deps(
         }
         drop(tx);
     });
-    let results: Vec<_> = rx.iter().flatten().collect();
+    let mut results: Vec<(String, String, String)> = Vec::new();
+    let mut last_progress = 0usize;
+    for item in rx.iter() {
+        if let Some(entry) = item {
+            results.push(entry);
+        }
+        let done = results.len();
+        let remaining = total_resolve.saturating_sub(done);
+        if done - last_progress >= 20 || remaining == 0 {
+            eprintln!("  progress: {done}/{total_resolve} fetched, {remaining} remaining");
+            last_progress = done;
+        }
+    }
 
     for (dep_name, short_ver, hash_str) in &results {
         pkg_entries.push(PackageEntry {
@@ -942,10 +951,6 @@ pub(crate) fn cmd_install_specs(
 
     println!("Updated ara.toml with {} dep(s)", m.deps.len());
 
-    if !pkg_entries.is_empty() {
-        write_lockfile(&cwd, Some(&store), &pkg_entries)?;
-    }
-
     // Install transitive dependencies discovered from the newly installed packages
     install_transitive_deps(
         &node_modules,
@@ -954,6 +959,10 @@ pub(crate) fn cmd_install_specs(
         &mut pkg_entries,
         &installed_names,
     )?;
+
+    if !pkg_entries.is_empty() {
+        write_lockfile(&cwd, Some(&store), &pkg_entries)?;
+    }
 
     Ok(())
 }
