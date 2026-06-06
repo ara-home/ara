@@ -328,89 +328,108 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 
 /// Scan `node_modules/<pkg>/package.json` for each installed package and
 /// recursively install any missing transitive dependencies.
+fn collect_installed_names(node_modules: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = std::fs::read_dir(node_modules) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ftype) = entry.file_type() else {
+            continue;
+        };
+        if !ftype.is_dir() {
+            continue;
+        }
+        let fname = match path.file_name().and_then(|s| s.to_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+        if fname == ".bin" {
+            continue;
+        }
+        if fname.starts_with('@') {
+            let Ok(sub_entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for sub in sub_entries.flatten() {
+                let sub_path = sub.path();
+                if sub.file_type().ok().is_some_and(|t| t.is_dir()) {
+                    if let Some(sub_name) = sub_path.file_name().and_then(|s| s.to_str()) {
+                        names.push(format!("{}/{}", fname, sub_name));
+                    }
+                }
+            }
+        } else {
+            names.push(fname);
+        }
+    }
+    names
+}
+
+fn read_deps_from_package_json(node_modules: &Path, pkg_name: &str) -> Vec<(String, String)> {
+    let pkg_json = node_modules.join(pkg_name).join("package.json");
+    let content = match std::fs::read_to_string(&pkg_json) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let pkg: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut deps = Vec::new();
+    let dep_sources = ["dependencies", "peerDependencies", "optionalDependencies"];
+    for key in &dep_sources {
+        if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
+            for (name, ver) in map {
+                if let Some(ver_str) = ver.as_str() {
+                    deps.push((name.clone(), ver_str.to_string()));
+                }
+            }
+        }
+    }
+    deps
+}
+
 fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
     store_index: &Arc<Mutex<HashMap<String, String>>>,
     pkg_entries: &mut Vec<PackageEntry>,
+    initial_packages: &[String],
 ) -> Result<()> {
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
 
-    let mut installed_any = true;
-    while installed_any {
-        installed_any = false;
+    // Seed the queue with packages that need scanning (deps of these will be discovered).
+    // First, add packages just installed by the caller.
+    // Also scan pre-existing packages in node_modules once.
+    let existing = collect_installed_names(node_modules);
+    let mut to_scan: Vec<String> = initial_packages
+        .iter()
+        .chain(existing.iter())
+        .filter(|n| !n.is_empty())
+        .cloned()
+        .collect();
+    let mut seen: HashSet<String> = to_scan.iter().cloned().collect();
 
-        let mut transitive_needs: Vec<(String, String)> = Vec::new();
-
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(node_modules) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(ftype) = entry.file_type() else {
-                    continue;
-                };
-                if !ftype.is_dir() {
-                    continue;
-                }
-                let fname = match path.file_name().and_then(|s| s.to_str()) {
-                    Some(f) => f.to_string(),
-                    None => continue,
-                };
-                if fname == ".bin" {
-                    continue;
-                }
-                if fname.starts_with('@') {
-                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                        for sub in sub_entries.flatten() {
-                            let sub_path = sub.path();
-                            if sub.file_type().ok().is_some_and(|t| t.is_dir()) {
-                                dirs.push(sub_path);
-                            }
-                        }
-                    }
-                } else {
-                    dirs.push(path);
-                }
-            }
-        }
-
-        for pkg_dir in &dirs {
-            let pkg_json = pkg_dir.join("package.json");
-            if !pkg_json.exists() {
-                continue;
-            }
-            let content = match std::fs::read_to_string(&pkg_json) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let pkg: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            let dep_sources = ["dependencies", "peerDependencies", "optionalDependencies"];
-            for key in &dep_sources {
-                if let Some(map) = pkg.get(key).and_then(|v| v.as_object()) {
-                    for (name, ver) in map {
-                        if let Some(ver_str) = ver.as_str() {
-                            let dep_dir = node_modules.join(name);
-                            if !dep_dir.exists() {
-                                transitive_needs.push((name.clone(), ver_str.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    while !to_scan.is_empty() {
+        // Discover dependencies of the current batch by reading package.json files
+        let mut transitive_needs: Vec<(String, String)> = to_scan
+            .par_iter()
+            .flat_map(|pkg_name| read_deps_from_package_json(node_modules, pkg_name))
+            .collect();
+        to_scan.clear();
 
         if transitive_needs.is_empty() {
             break;
         }
 
-        // Remove duplicates while preserving order
-        let mut seen = HashSet::new();
-        transitive_needs.retain(|(name, _)| seen.insert(name.clone()));
+        // Deduplicate and skip already-installed packages
+        let mut dedup = HashSet::new();
+        transitive_needs
+            .retain(|(name, _)| dedup.insert(name.clone()) && !node_modules.join(name).exists());
 
         let results: Vec<_> = transitive_needs
             .par_iter()
@@ -534,13 +553,14 @@ fn install_transitive_deps(
                 security: None,
                 sbom: None,
             });
-            installed_any = true;
+            if seen.insert(dep_name.clone()) {
+                to_scan.push(dep_name.clone());
+            }
         }
     }
 
     Ok(())
 }
-
 pub(crate) fn cmd_install(non_interactive: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     cmd_install_in(&cwd, non_interactive)
@@ -634,6 +654,7 @@ pub(crate) fn cmd_install_specs(
         Vec::new()
     };
 
+    let mut installed_names: Vec<String> = Vec::new();
     for spec in specs {
         let target = crate::source::url::parse_install_spec(spec)
             .with_context(|| format!("failed to parse spec: {spec}"))?;
@@ -856,6 +877,7 @@ pub(crate) fn cmd_install_specs(
             security,
             sbom: None,
         });
+        installed_names.push(meta.name.clone());
 
         println!();
     }
@@ -879,7 +901,13 @@ pub(crate) fn cmd_install_specs(
     }
 
     // Install transitive dependencies discovered from the newly installed packages
-    install_transitive_deps(&node_modules, &store, &store_index, &mut pkg_entries)?;
+    install_transitive_deps(
+        &node_modules,
+        &store,
+        &store_index,
+        &mut pkg_entries,
+        &installed_names,
+    )?;
 
     Ok(())
 }
@@ -1495,7 +1523,14 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     }
 
     // Install transitive dependencies discovered from extracted packages
-    install_transitive_deps(&node_modules, &store, &store_index, &mut pkg_entries)?;
+    let installed_names: Vec<String> = processed.iter().map(|p| p.name.clone()).collect();
+    install_transitive_deps(
+        &node_modules,
+        &store,
+        &store_index,
+        &mut pkg_entries,
+        &installed_names,
+    )?;
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
