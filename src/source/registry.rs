@@ -6,7 +6,7 @@ use crate::source::SourceError;
 use crate::types::{Constraint, PackageIdentity, Version};
 use crate::util::http::HttpClient;
 
-const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
+const CACHE_TTL: Duration = Duration::from_secs(604800); // 7 days
 
 type DepMap = HashMap<String, String>;
 
@@ -26,7 +26,7 @@ impl RegistrySource {
 
     /// Fetch package metadata from the registry, using a local disk cache
     /// for the default npm registry to avoid redundant HTTP requests.
-    fn fetch_metadata(&self, name: &str) -> Result<serde_json::Value, SourceError> {
+    pub(crate) fn fetch_metadata(&self, name: &str) -> Result<serde_json::Value, SourceError> {
         let use_cache = self.registry_url.contains("registry.npmjs.org");
 
         if use_cache {
@@ -282,6 +282,97 @@ impl RegistrySource {
         };
 
         Ok((
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
+    }
+
+    /// Extract dependency declarations from pre-fetched metadata for an exact version.
+    pub(crate) fn get_deps_for_version_from_meta(
+        &self,
+        metadata: &serde_json::Value,
+        version_str: &str,
+    ) -> Result<(DepMap, DepMap, DepMap), SourceError> {
+        let ver_data = metadata
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get(version_str))
+            .ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            extract_deps("dependencies"),
+            extract_deps("peerDependencies"),
+            extract_deps("optionalDependencies"),
+        ))
+    }
+
+    /// Resolve the best matching version + extract deps from pre-fetched metadata.
+    pub(crate) fn resolve_and_get_deps_from_meta(
+        &self,
+        metadata: &serde_json::Value,
+        constraint_str: &str,
+    ) -> Result<(String, DepMap, DepMap, DepMap), SourceError> {
+        let constraint =
+            Constraint::parse(constraint_str).map_err(|_| SourceError::VersionNotFound)?;
+
+        let versions = metadata
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .ok_or(SourceError::PackageNotFound)?;
+
+        let mut best: Option<&serde_json::Value> = None;
+        let mut best_ver: Option<String> = None;
+        for (ver_str, ver_data) in versions {
+            if let Ok(ver) = Version::parse(ver_str) {
+                if constraint.satisfied_by(&ver) {
+                    match &best_ver {
+                        Some(ref current) => {
+                            if let Ok(current_ver) = Version::parse(current) {
+                                if ver > current_ver {
+                                    best = Some(ver_data);
+                                    best_ver = Some(ver_str.clone());
+                                }
+                            }
+                        }
+                        None => {
+                            best = Some(ver_data);
+                            best_ver = Some(ver_str.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let ver_str = best_ver.ok_or(SourceError::VersionNotFound)?;
+        let ver_data = best.ok_or(SourceError::VersionNotFound)?;
+
+        let extract_deps = |key: &str| -> HashMap<String, String> {
+            ver_data
+                .get(key)
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok((
+            ver_str,
             extract_deps("dependencies"),
             extract_deps("peerDependencies"),
             extract_deps("optionalDependencies"),

@@ -419,42 +419,65 @@ fn install_transitive_deps(
 
     // =============================================
     // Phase 1: Build complete resolution map from npm metadata.
-    // No tarballs are downloaded — only cached metadata requests.
     //
-    // Uses a dedicated I/O pool (64 threads) instead of rayon's default
-    // CPU-bound pool to avoid thread starvation during HTTP requests.
+    // Uses a dedicated I/O pool + in-memory metadata cache to avoid
+    // redundant HTTP requests for packages whose metadata was already
+    // fetched in a prior level.
     //
-    // Within each level, dep resolution is flattened into a single
-    // parallel batch so that ALL HTTP requests are concurrent,
-    // not sequential per-package.
+    // Within each level, deps are:
+    //   1. Fetch metadata (parallel, cached in memory)
+    //   2. Extract dependency declarations from cached metadata (sequential)
+    //   3. Fetch metadata for new deps (parallel, cached in memory)
+    //   4. Resolve versions from cached metadata (sequential)
     // =============================================
     let t_resolution = Instant::now();
     let mut level_count = 0u32;
+    let mut meta_cache: HashMap<String, serde_json::Value> = HashMap::new();
     while !pending.is_empty() {
         level_count += 1;
         let batch: Vec<String> = std::mem::take(&mut pending);
 
-        // Step A: Fetch metadata for all packages in this batch.
-        // Returns a list of (dep_name, dep_range) pairs for each package.
-        let dep_lists: Vec<Vec<(String, String)>> = io_pool().install(|| {
-            batch
-                .par_iter()
-                .filter_map(|name| {
-                    let exact_ver = resolution.get(name)?;
-                    let (deps, _peers, _optional) =
-                        reg.get_deps_for_version(name, exact_ver).ok()?;
-                    let all: Vec<(String, String)> = deps.into_iter().collect();
-                    if all.is_empty() {
-                        None
-                    } else {
-                        Some(all)
-                    }
-                })
-                .collect()
-        });
+        // 1a. Fetch metadata for any batch packages not yet in memory cache
+        let batch_uncached: Vec<String> = batch
+            .iter()
+            .filter(|n| !meta_cache.contains_key(*n))
+            .cloned()
+            .collect();
+        if !batch_uncached.is_empty() {
+            let fetched: Vec<(String, serde_json::Value)> = io_pool().install(|| {
+                batch_uncached
+                    .par_iter()
+                    .filter_map(|name| {
+                        let _exact_ver = resolution.get(name)?;
+                        reg.fetch_metadata(name)
+                            .ok()
+                            .map(|meta| (name.clone(), meta))
+                    })
+                    .collect()
+            });
+            for (name, meta) in fetched {
+                meta_cache.insert(name, meta);
+            }
+        }
 
-        // Step B: Deduplicate deps by name, filter out already-resolved,
-        // then resolve all to exact versions in parallel.
+        // 1b. Extract deps for all batch packages from cached metadata
+        let dep_lists: Vec<Vec<(String, String)>> = batch
+            .iter()
+            .filter_map(|name| {
+                let exact_ver = resolution.get(name)?;
+                let meta = meta_cache.get(name)?;
+                let (deps, _peers, _optional) =
+                    reg.get_deps_for_version_from_meta(meta, exact_ver).ok()?;
+                let all: Vec<(String, String)> = deps.into_iter().collect();
+                if all.is_empty() {
+                    None
+                } else {
+                    Some(all)
+                }
+            })
+            .collect();
+
+        // 2. Deduplicate deps, filter already-resolved
         let mut seen_dep: HashSet<String> = HashSet::new();
         let unique_deps: Vec<(String, String)> = dep_lists
             .iter()
@@ -467,19 +490,40 @@ fn install_transitive_deps(
             .cloned()
             .collect();
 
-        let discovered: Vec<(String, String)> = io_pool().install(|| {
-            unique_deps
-                .par_iter()
-                .filter_map(|(dep_name, dep_range)| {
-                    match reg.resolve_and_get_deps(dep_name.as_str(), dep_range.as_str()) {
-                        Ok((resolved_ver, _, _, _)) => Some((dep_name.clone(), resolved_ver)),
-                        Err(_) => None,
-                    }
-                })
-                .collect()
-        });
+        // 3a. Fetch metadata for new deps (if not already cached)
+        let dep_uncached: Vec<String> = unique_deps
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|n| !meta_cache.contains_key(n))
+            .collect();
+        if !dep_uncached.is_empty() {
+            let fetched: Vec<(String, serde_json::Value)> = io_pool().install(|| {
+                dep_uncached
+                    .par_iter()
+                    .filter_map(|name| {
+                        let meta = reg.fetch_metadata(name).ok()?;
+                        Some((name.clone(), meta))
+                    })
+                    .collect()
+            });
+            for (name, meta) in fetched {
+                meta_cache.insert(name, meta);
+            }
+        }
 
-        // Step C: Add newly discovered packages to resolution + pending
+        // 3b. Resolve versions for unique deps from cached metadata
+        let discovered: Vec<(String, String)> = unique_deps
+            .iter()
+            .filter_map(|(dep_name, dep_range)| {
+                let meta = meta_cache.get(dep_name)?;
+                match reg.resolve_and_get_deps_from_meta(meta, dep_range) {
+                    Ok((ver, _, _, _)) => Some((dep_name.clone(), ver)),
+                    Err(_) => None,
+                }
+            })
+            .collect();
+
+        // 4. Add newly discovered packages to resolution + pending
         for (name, ver) in discovered {
             if seen.insert(name.clone()) {
                 resolution.insert(name.clone(), ver);
