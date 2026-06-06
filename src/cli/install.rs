@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -367,6 +367,26 @@ fn collect_installed_names(node_modules: &Path) -> Vec<String> {
     names
 }
 
+/// Dedicated I/O thread pool for concurrent metadata fetches.
+/// Uses 64 threads to allow parallel HTTP requests without starving
+/// the CPU-bound rayon pool.
+fn io_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        match rayon::ThreadPoolBuilder::new()
+            .num_threads(64)
+            .thread_name(|i| format!("ara-io-{}", i))
+            .build()
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!("fatal: failed to create I/O thread pool: {e}");
+                std::process::exit(1);
+            }
+        }
+    })
+}
+
 fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
@@ -385,77 +405,110 @@ fn install_transitive_deps(
     }
 
     // Seed the queue: initial packages + pre-existing node_modules
+    // These go into pending so their deps can be scanned from metadata.
     let existing = collect_installed_names(node_modules);
+    let mut seen: HashSet<String> = HashSet::new();
     let mut pending: Vec<String> = initial_packages
         .iter()
         .chain(existing.iter())
-        .filter(|n| !n.is_empty() && !resolution.contains_key(*n))
+        .filter(|n| !n.is_empty() && seen.insert(n.to_string()))
         .cloned()
-        .collect();
-    let mut seen: HashSet<String> = resolution
-        .keys()
-        .cloned()
-        .chain(pending.iter().cloned())
         .collect();
 
     // =============================================
     // Phase 1: Build complete resolution map from npm metadata.
     // No tarballs are downloaded — only cached metadata requests.
+    //
+    // Uses a dedicated I/O pool (64 threads) instead of rayon's default
+    // CPU-bound pool to avoid thread starvation during HTTP requests.
+    //
+    // Within each level, dep resolution is flattened into a single
+    // parallel batch so that ALL HTTP requests are concurrent,
+    // not sequential per-package.
     // =============================================
     while !pending.is_empty() {
         let batch: Vec<String> = std::mem::take(&mut pending);
 
-        let discovered: Vec<(String, String)> = batch
-            .par_iter()
-            .filter_map(|name| {
-                let mut found: Vec<(String, String)> = Vec::new();
-                let exact_ver = resolution.get(name)?;
-
-                // Read deps from registry metadata (disk-cached, no tarball)
-                let (deps, peers, optional) = reg.get_deps_for_version(name, exact_ver).ok()?;
-
-                for (dep_name, dep_range) in deps.iter().chain(peers.iter()).chain(optional.iter())
-                {
-                    if resolution.contains_key(dep_name) || node_modules.join(dep_name).exists() {
-                        continue;
+        // Step A: Fetch metadata for all packages in this batch.
+        // Returns a list of (dep_name, dep_range) pairs for each package.
+        let dep_lists: Vec<Vec<(String, String)>> = io_pool().install(|| {
+            batch
+                .par_iter()
+                .filter_map(|name| {
+                    let exact_ver = resolution.get(name)?;
+                    let (deps, peers, optional) = reg.get_deps_for_version(name, exact_ver).ok()?;
+                    let all: Vec<(String, String)> = deps
+                        .into_iter()
+                        .chain(peers.into_iter())
+                        .chain(optional.into_iter())
+                        .collect();
+                    if all.is_empty() {
+                        None
+                    } else {
+                        Some(all)
                     }
-                    if let Ok((resolved_ver, _, _, _)) =
-                        reg.resolve_and_get_deps(dep_name, dep_range)
-                    {
-                        found.push((dep_name.clone(), resolved_ver));
-                    }
-                }
-                Some(found)
-            })
+                })
+                .collect()
+        });
+
+        // Step B: Deduplicate deps by name, filter out already-resolved,
+        // then resolve all to exact versions in parallel.
+        let mut seen_dep: HashSet<String> = HashSet::new();
+        let unique_deps: Vec<(String, String)> = dep_lists
+            .iter()
             .flatten()
+            .filter(|(name, _)| seen_dep.insert(name.clone()))
+            .filter(|(name, _)| {
+                !resolution.contains_key(name.as_str())
+                    && !node_modules.join(name.as_str()).exists()
+            })
+            .cloned()
             .collect();
 
-        let mut new_pending: Vec<String> = Vec::new();
+        let discovered: Vec<(String, String)> = io_pool().install(|| {
+            unique_deps
+                .par_iter()
+                .filter_map(|(dep_name, dep_range)| {
+                    match reg.resolve_and_get_deps(dep_name.as_str(), dep_range.as_str()) {
+                        Ok((resolved_ver, _, _, _)) => Some((dep_name.clone(), resolved_ver)),
+                        Err(_) => None,
+                    }
+                })
+                .collect()
+        });
+
+        // Step C: Add newly discovered packages to resolution + pending
         for (name, ver) in discovered {
             if seen.insert(name.clone()) {
                 resolution.insert(name.clone(), ver);
-                new_pending.push(name);
+                pending.push(name);
             }
         }
-        pending = new_pending;
     }
 
     // =============================================
     // Phase 2: Fetch tarballs + extract in one parallel batch.
+    // Uses individual task spawns + channel so fast packages are
+    // reported immediately without waiting for slow ones.
     // =============================================
-    let results: Vec<_> = resolution
-        .par_iter()
-        .filter_map(|(dep_name, exact_ver)| {
-            let dep_dir = node_modules.join(dep_name);
+    let total_resolve = resolution.len();
+    eprintln!("  fetching {} packages", total_resolve);
+    let (tx, rx) = std::sync::mpsc::channel::<Option<(String, String, String)>>();
+    // Bind shared references so they're Copy in move closures
+    let store_ref = store;
+    let reg_ref = &reg;
+    let nm = node_modules;
+    let idx_store = Arc::clone(store_index);
+    io_pool().scope(|scope| {
+        for (dep_name, exact_ver) in &resolution {
+            let dep_dir = nm.join(dep_name);
             if dep_dir.exists() {
-                return None;
+                continue;
             }
-
             let parsed_ver = match Version::parse(exact_ver) {
                 Ok(v) => v,
-                Err(_) => return None,
+                Err(_) => continue,
             };
-
             let identity = PackageIdentity {
                 source: SourceType::Npm,
                 name: dep_name.clone(),
@@ -463,79 +516,78 @@ fn install_transitive_deps(
                 content_hash: None,
                 requested_ref: None,
             };
-
             let short_ver = format!(
                 "{}.{}.{}",
                 parsed_ver.major, parsed_ver.minor, parsed_ver.patch
             );
             let cache_key = format!("npm:{}@{}", dep_name, short_ver);
-
-            let cache_lookup = {
-                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                idx.get(&cache_key).cloned()
-            };
-
-            let hash_str = if let Some(cached_hash) = cache_lookup {
-                if store.contains(&cached_hash) {
-                    println!("    using cached {}@{}", dep_name, short_ver);
-                    cached_hash
-                } else {
-                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                    idx.remove(&cache_key);
-                    match reg.fetch(&identity) {
-                        Ok(content) => {
-                            let hash = match store.put(&content) {
-                                Ok(h) => h,
+            let dep_name = dep_name.clone();
+            let tx = tx.clone();
+            let idx = Arc::clone(&idx_store);
+            scope.spawn(move |_| {
+                let cache_lookup = {
+                    let guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.get(&cache_key).cloned()
+                };
+                let result = if let Some(cached_hash) = cache_lookup {
+                    if store_ref.contains(&cached_hash) {
+                        println!("    using cached {}@{}", dep_name, short_ver);
+                        cached_hash
+                    } else {
+                        let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.remove(&cache_key);
+                        match reg_ref.fetch(&identity) {
+                            Ok(content) => match store_ref.put(&content) {
+                                Ok(h) => {
+                                    guard.insert(cache_key, h.clone());
+                                    h
+                                }
                                 Err(e) => {
                                     eprintln!("    warning: failed to store {}: {}", dep_name, e);
-                                    return None;
+                                    return;
                                 }
-                            };
-                            idx.insert(cache_key, hash.clone());
-                            hash
-                        }
-                        Err(e) => {
-                            eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
-                            return None;
+                            },
+                            Err(e) => {
+                                eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                                return;
+                            }
                         }
                     }
-                }
-            } else {
-                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                match reg.fetch(&identity) {
-                    Ok(content) => {
-                        let hash = match store.put(&content) {
-                            Ok(h) => h,
+                } else {
+                    let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
+                    match reg_ref.fetch(&identity) {
+                        Ok(content) => match store_ref.put(&content) {
+                            Ok(h) => {
+                                guard.insert(cache_key, h.clone());
+                                h
+                            }
                             Err(e) => {
                                 eprintln!("    warning: failed to store {}: {}", dep_name, e);
-                                return None;
+                                return;
                             }
-                        };
-                        idx.insert(cache_key, hash.clone());
-                        hash
+                        },
+                        Err(e) => {
+                            eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
-                        return None;
-                    }
+                };
+                if let Err(e) = extract_package_cached(store_ref, &result, &dep_dir) {
+                    eprintln!("    failed to extract {}: {}", dep_name, e);
+                    return;
                 }
-            };
-
-            if let Err(e) = extract_package_cached(store, &hash_str, &dep_dir) {
-                eprintln!("    failed to extract {}: {}", dep_name, e);
-                return None;
-            }
-
-            if let Err(e) = install_bin_links(node_modules, dep_name, &dep_dir) {
-                eprintln!(
-                    "    warning: failed to create bin links for {}: {}",
-                    dep_name, e
-                );
-            }
-
-            Some((dep_name.clone(), short_ver, hash_str))
-        })
-        .collect();
+                if let Err(e) = install_bin_links(nm, dep_name.as_str(), &dep_dir) {
+                    eprintln!(
+                        "    warning: failed to create bin links for {}: {}",
+                        dep_name, e
+                    );
+                }
+                tx.send(Some((dep_name, short_ver, result))).ok();
+            });
+        }
+        drop(tx);
+    });
+    let results: Vec<_> = rx.iter().flatten().collect();
 
     for (dep_name, short_ver, hash_str) in &results {
         pkg_entries.push(PackageEntry {
