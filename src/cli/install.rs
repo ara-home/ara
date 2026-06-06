@@ -332,6 +332,7 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 
     for (name, rel_path) in &bin_entries {
         let link = bin_dir.join(name);
+        #[allow(unused_variables)]
         let target = format!("../{}/{}", pkg_name, rel_path);
         let actual_file = pkg_dir.join(rel_path);
 
@@ -1975,12 +1976,22 @@ fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&target)?;
         } else if entry.file_type().is_symlink() {
-            let link_target = std::fs::read_link(entry.path())?;
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                let link_target = std::fs::read_link(entry.path())?;
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let _ = std::fs::remove_file(&target);
+                std::os::unix::fs::symlink(&link_target, &target)?;
             }
-            let _ = std::fs::remove_file(&target);
-            std::os::unix::fs::symlink(&link_target, &target)?;
+            #[cfg(not(unix))]
+            {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let _ = std::fs::copy(entry.path(), &target);
+            }
         } else {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;

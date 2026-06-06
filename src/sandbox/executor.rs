@@ -31,6 +31,7 @@ impl Executor {
         command: &str,
         env: Option<HashMap<String, String>>,
     ) -> Result<(), ExecutorError> {
+        #[allow(unused_variables)]
         let profile = self.config.profile;
 
         let mut cmd = Command::new("sh");
