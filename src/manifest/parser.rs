@@ -6,10 +6,6 @@ use crate::manifest::types::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestParseError {
-    #[error("missing project name")]
-    MissingProjectName,
-    #[error("missing project version")]
-    MissingProjectVersion,
     #[error("unknown source type")]
     UnknownSourceType,
     #[error("invalid risk level")]
@@ -64,17 +60,20 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
 
     let project = match raw.project {
         Some(p) => {
-            let name = p.name.unwrap_or_default();
-            let version = p.version.unwrap_or_default();
-            if name.is_empty() {
-                return Err(ManifestParseError::MissingProjectName);
-            }
-            if version.is_empty() {
-                return Err(ManifestParseError::MissingProjectVersion);
-            }
+            let name = p
+                .name
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "project".to_string());
+            let version = p
+                .version
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "0.0.0".to_string());
             Project { name, version }
         }
-        None => return Err(ManifestParseError::MissingProjectName),
+        None => Project {
+            name: "project".to_string(),
+            version: "0.0.0".to_string(),
+        },
     };
 
     let valid_sources = ["npm", "registry", "github", "git", "local", "workspace"];
@@ -196,30 +195,6 @@ mod tests {
         assert!(m.workspace.is_some());
         assert_eq!(m.workspace.as_ref().unwrap().members.len(), 2);
         assert_eq!(m.workspace.as_ref().unwrap().members[0], "apps/*");
-    }
-
-    #[test]
-    fn test_parse_missing_project_section() {
-        let src = r#"
-            name = "no-project"
-            version = "0.1.0"
-        "#;
-        match parse(src) {
-            Err(ManifestParseError::MissingProjectName) => {}
-            other => panic!("expected MissingProjectName, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_parse_missing_project_version() {
-        let src = r#"
-            [project]
-            name = "app"
-        "#;
-        match parse(src) {
-            Err(ManifestParseError::MissingProjectVersion) => {}
-            other => panic!("expected MissingProjectVersion, got {other:?}"),
-        }
     }
 
     #[test]

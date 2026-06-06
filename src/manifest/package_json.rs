@@ -32,14 +32,14 @@ pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError>
     let raw: PackageJsonRaw =
         serde_json::from_str(content).map_err(|e| ManifestParseError::Json(e.to_string()))?;
 
-    let name = raw.name.unwrap_or_default();
-    let version = raw.version.unwrap_or_default();
-    if name.is_empty() {
-        return Err(ManifestParseError::MissingProjectName);
-    }
-    if version.is_empty() {
-        return Err(ManifestParseError::MissingProjectVersion);
-    }
+    let name = raw
+        .name
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    let version = raw
+        .version
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "0.0.0".to_string());
 
     let project = Project { name, version };
 
@@ -383,24 +383,6 @@ mod tests {
         let ws = m.workspace.unwrap();
         assert_eq!(ws.members.len(), 2);
         assert_eq!(ws.members[0], "apps/*");
-    }
-
-    #[test]
-    fn test_parse_missing_name() {
-        let json = r#"{"version": "1.0.0"}"#;
-        match parse_package_json(json) {
-            Err(ManifestParseError::MissingProjectName) => {}
-            other => panic!("expected MissingProjectName, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_parse_missing_version() {
-        let json = r#"{"name": "app"}"#;
-        match parse_package_json(json) {
-            Err(ManifestParseError::MissingProjectVersion) => {}
-            other => panic!("expected MissingProjectVersion, got {other:?}"),
-        }
     }
 
     #[test]
