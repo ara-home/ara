@@ -143,18 +143,20 @@ ara install --non-interactive  # Silent — useful for CI
 
 Works with existing npm projects out of the box — no migration step needed.
 
-#### Direct package install
+### `ara add` (Direct package install)
 
-You can also install packages directly by spec without an existing manifest. Ara resolves the spec, bootstraps a minimal manifest, downloads and extracts the package, and writes the lockfile — all in one step.
+You can install packages directly by spec and save them to the manifest. Ara resolves the spec, downloads and extracts the package, and writes the updated `package.json` and lockfile — all in one step.
 
 ```bash
-ara install react                    # latest from npm registry
-ara install react@18.2.0             # exact version
-ara install zod@^3                   # range (resolved to latest matching)
-ara install --save-dev eslint        # save as dev dependency
-ara install --range=caret zod        # save with ^ prefix
-ara install react zod typescript     # multiple packages at once
+ara add react                    # latest from npm registry
+ara add react@18.2.0             # exact version
+ara add zod@^3                   # range (resolved to latest matching)
+ara add --save-dev eslint        # save as dev dependency
+ara add --range=caret zod        # save with ^ prefix
+ara add react zod typescript     # multiple packages at once
 ```
+
+Note: `ara install <package>` is aliased to `ara add <package>`.
 
 Supported spec formats:
 

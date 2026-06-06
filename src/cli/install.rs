@@ -969,14 +969,12 @@ pub(crate) async fn cmd_install_specs(
 
         let mut meta = resolve_spec_meta(&target, range).await?;
 
-        if m.deps.iter().any(|d| d.name == meta.name) {
-            println!("  {} already in manifest, skipping", meta.name);
-            continue;
+        if let Some(pos) = m.deps.iter().position(|d| d.name == meta.name) {
+            m.deps.remove(pos);
         }
 
-        if pkg_entries.iter().any(|e| e.name == meta.name) {
-            println!("  {} already in lockfile, skipping", meta.name);
-            continue;
+        if let Some(pos) = pkg_entries.iter().position(|e| e.name == meta.name) {
+            pkg_entries.remove(pos);
         }
 
         // Compute version string and cache key (source-type aware)
