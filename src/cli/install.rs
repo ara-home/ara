@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use rayon::prelude::*;
 
@@ -426,7 +428,10 @@ fn install_transitive_deps(
     // parallel batch so that ALL HTTP requests are concurrent,
     // not sequential per-package.
     // =============================================
+    let t_resolution = Instant::now();
+    let mut level_count = 0u32;
     while !pending.is_empty() {
+        level_count += 1;
         let batch: Vec<String> = std::mem::take(&mut pending);
 
         // Step A: Fetch metadata for all packages in this batch.
@@ -484,16 +489,25 @@ fn install_transitive_deps(
 
         eprintln!("  resolved {} packages...", resolution.len());
     }
+    eprintln!(
+        "  [profile] phase 3a resolution ({} levels, {} pkgs): {:?}",
+        level_count,
+        resolution.len(),
+        t_resolution.elapsed()
+    );
 
     // =============================================
     // Phase 2: Download → extract → bin links (I/O pool, 32 threads).
     // =============================================
+    let t_dle = Instant::now();
+    let cache_hits = Arc::new(AtomicU32::new(0));
     let total_resolve = resolution.len();
     let (tx, rx) = std::sync::mpsc::channel::<Option<(String, String, String)>>();
     let reg_ref = &reg;
     let idx_store = Arc::clone(store_index);
     let store_ref = store;
     let nm = node_modules;
+    let cache_hits_ref = Arc::clone(&cache_hits);
     io_pool().scope(|scope| {
         for (dep_name, exact_ver) in &resolution {
             let dep_dir = nm.join(dep_name);
@@ -519,6 +533,7 @@ fn install_transitive_deps(
             let dep_name = dep_name.clone();
             let tx = tx.clone();
             let idx = Arc::clone(&idx_store);
+            let ch = Arc::clone(&cache_hits_ref);
             scope.spawn(move |_| {
                 let cache_lookup = {
                     let guard = idx.lock().unwrap_or_else(|e| e.into_inner());
@@ -526,7 +541,7 @@ fn install_transitive_deps(
                 };
                 let result = if let Some(cached_hash) = cache_lookup {
                     if store_ref.contains(&cached_hash) {
-                        println!("    using cached {}@{}", dep_name, short_ver);
+                        ch.fetch_add(1, Ordering::Relaxed);
                         cached_hash
                     } else {
                         let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
@@ -595,6 +610,13 @@ fn install_transitive_deps(
             last_progress = done;
         }
     }
+    let fresh = total_resolve.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
+    eprintln!(
+        "  [profile] phase 3b download+extract: {:?} (hits: {}, fresh: {})",
+        t_dle.elapsed(),
+        cache_hits.load(Ordering::Relaxed),
+        fresh,
+    );
 
     for (dep_name, short_ver, hash_str) in &results {
         pkg_entries.push(PackageEntry {
@@ -1338,6 +1360,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     println!("Resolved {} packages", graph.nodes.len());
 
     // Connect resolve(): enhance each node's version from registry sources
+    let t_resolve = Instant::now();
     for node in &mut graph.nodes {
         if let Some(dep) = find_dep(&m.deps, &node.name) {
             if let Ok(src) = create_source(node.source, dep) {
@@ -1349,6 +1372,11 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
             }
         }
     }
+    eprintln!(
+        "  [profile] resolve versions ({} nodes): {:?}",
+        graph.nodes.len(),
+        t_resolve.elapsed()
+    );
 
     // Connect has_cycles(): warn if circular dependencies found
     if graph.has_cycles() {
@@ -1416,6 +1444,7 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         analysis: Result<crate::types::AnalysisResult>,
     }
 
+    let t_phase1 = Instant::now();
     let processed: Vec<ProcessedNode> = graph
         .nodes
         .par_iter()
@@ -1482,6 +1511,10 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
             })
         })
         .collect();
+    eprintln!(
+        "  [profile] phase 1 (direct deps): {:?}",
+        t_phase1.elapsed()
+    );
 
     // Handle security decisions sequentially (necessary for interactive prompts)
     for pkg in &processed {
@@ -1566,6 +1599,11 @@ fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
         println!();
     }
+    eprintln!(
+        "  [profile] security eval ({} pkgs): {:?}",
+        processed.len(),
+        t_phase1.elapsed()
+    );
 
     // Save store index
     {
