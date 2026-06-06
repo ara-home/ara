@@ -293,7 +293,8 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 
     let bin_entries: Vec<(String, String)> = match pkg.get("bin") {
         Some(serde_json::Value::String(cmd)) => {
-            vec![(pkg_name.to_string(), cmd.clone())]
+            let unscoped_name = pkg_name.split('/').last().unwrap_or(pkg_name).to_string();
+            vec![(unscoped_name, cmd.clone())]
         }
         Some(serde_json::Value::Object(map)) => map
             .iter()
@@ -312,14 +313,29 @@ fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Res
 
     for (name, rel_path) in &bin_entries {
         let link = bin_dir.join(name);
-        // Target is relative: ../pkg_name/rel_path
         let target = format!("../{}/{}", pkg_name, rel_path);
+        let actual_file = pkg_dir.join(rel_path);
+
+        #[cfg(unix)]
+        if let Ok(metadata) = std::fs::metadata(&actual_file) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            if let Err(e) = std::fs::set_permissions(&actual_file, perms) {
+                eprintln!(
+                    "  warning: failed to set executable permissions on {actual_file:?}: {e}"
+                );
+            }
+        }
+
         let _ = std::fs::remove_file(&link);
+
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link)
             .with_context(|| format!("failed to create symlink {link:?} -> {target}"))?;
+
         #[cfg(not(unix))]
-        std::fs::hard_link(pkg_dir.join(rel_path), &link)
+        std::fs::hard_link(&actual_file, &link)
             .with_context(|| format!("failed to link {link:?}"))?;
     }
 
@@ -440,11 +456,22 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
     });
     let mut deps: HashMap<String, HashMap<String, String>> = HashMap::new();
     for (ver_str, ver_data) in versions_map {
+        let mut deps_map = HashMap::new();
         if let Some(dep_map) = ver_data["dependencies"].as_object() {
-            let deps_map: HashMap<String, String> = dep_map
-                .iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect();
+            for (k, v) in dep_map {
+                if let Some(s) = v.as_str() {
+                    deps_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(opt_map) = ver_data["optionalDependencies"].as_object() {
+            for (k, v) in opt_map {
+                if let Some(s) = v.as_str() {
+                    deps_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if !deps_map.is_empty() {
             deps.insert(ver_str.clone(), deps_map);
         }
     }
@@ -479,12 +506,8 @@ async fn install_transitive_deps(
         .cloned()
         .collect();
 
-    // =============================================
-    // Phase 1: Build complete resolution map from compact package metadata.
-    //
     // Uses compact PackageMeta (versions + deps only) instead of storing
     // the full npm registry response (30MB+ for next.js).
-    // =============================================
     let t_resolution = Instant::now();
     let mut level_count = 0u32;
     let mut meta_cache: HashMap<String, PackageMeta> = HashMap::new();
@@ -494,7 +517,6 @@ async fn install_transitive_deps(
         level_count += 1;
         let batch: Vec<String> = std::mem::take(&mut pending);
 
-        // 1a. Fetch compact metadata for uncached batch packages
         let batch_uncached: Vec<String> = batch
             .iter()
             .filter(|n| !meta_cache.contains_key(*n))
@@ -544,7 +566,6 @@ async fn install_transitive_deps(
             }
         }
 
-        // 1b. Extract deps for all batch packages from compact cache
         let dep_lists: Vec<Vec<(String, String)>> = batch
             .iter()
             .filter_map(|name| {
@@ -560,7 +581,6 @@ async fn install_transitive_deps(
             })
             .collect();
 
-        // 2. Deduplicate deps, filter already-resolved
         let mut seen_dep: HashSet<String> = HashSet::new();
         let unique_deps: Vec<(String, String)> = dep_lists
             .iter()
@@ -573,7 +593,6 @@ async fn install_transitive_deps(
             .cloned()
             .collect();
 
-        // 3a. Fetch compact metadata for new deps
         let dep_uncached: Vec<String> = unique_deps
             .iter()
             .map(|(name, _)| name.clone())
@@ -619,7 +638,6 @@ async fn install_transitive_deps(
             }
         }
 
-        // 3b. Resolve versions using compact sorted version list
         let t1 = Instant::now();
         let discovered: Vec<(String, String)> = unique_deps
             .iter()
@@ -642,7 +660,6 @@ async fn install_transitive_deps(
             .collect();
         t_resolve += t1.elapsed();
 
-        // 4. Add newly discovered packages to resolution + pending
         for (name, ver) in discovered {
             if seen.insert(name.clone()) {
                 resolution.insert(name.clone(), ver);
@@ -661,9 +678,7 @@ async fn install_transitive_deps(
         t_resolve.as_secs_f64(),
     );
 
-    // =============================================
-    // Phase 2: Download → extract → bin links (I/O pool, 32 threads).
-    // =============================================
+    // Download → extract → bin links (I/O pool, 32 threads)
     let t_dle = Instant::now();
     let cache_hits = Arc::new(AtomicU32::new(0));
     let total_resolve = resolution.len();
@@ -1130,7 +1145,6 @@ pub(crate) async fn cmd_install_specs(
             continue;
         }
 
-        // Add to manifest
         m.deps.push(crate::manifest::types::DependencyEntry {
             name: meta.name.clone(),
             source: meta.source.clone(),

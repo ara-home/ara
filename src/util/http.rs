@@ -72,7 +72,13 @@ impl HttpClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return Ok(resp.bytes().await?.to_vec());
+                        match resp.bytes().await {
+                            Ok(bytes) => return Ok(bytes.to_vec()),
+                            Err(e) => {
+                                last_error = Some(HttpError::Request(e));
+                                continue;
+                            }
+                        }
                     }
                     if !Self::should_retry(Some(status)) {
                         return Err(HttpError::StatusNotOk(status));
