@@ -577,8 +577,8 @@ mod tests {
             let len = (rng.0 % 21) as usize;
             rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
             let mut buf = [0u8; 20];
-            for j in 0..len {
-                buf[j] = 32 + (rng.0 % 95) as u8;
+            for item in buf.iter_mut().take(len) {
+                *item = 32 + (rng.0 % 95) as u8;
                 rng.0 = rng.0.wrapping_mul(6364136223846793005).wrapping_add(1);
             }
             let input = std::str::from_utf8(&buf[..len]).unwrap_or("");

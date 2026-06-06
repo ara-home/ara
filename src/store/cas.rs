@@ -20,6 +20,7 @@ fn validate_key(key: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct Store {
     base_path: PathBuf,
 }

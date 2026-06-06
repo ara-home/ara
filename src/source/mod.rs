@@ -35,25 +35,25 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn resolve(&self, name: &str) -> Result<String, SourceError> {
+    pub async fn resolve(&self, name: &str) -> Result<String, SourceError> {
         match self {
-            Self::Local(s) => s.resolve(name),
-            Self::Workspace(s) => s.resolve(name),
-            Self::Git(s) => s.resolve(name),
-            Self::Github(s) => s.resolve(name),
-            Self::Registry(s) => s.resolve(name),
-            Self::Url(s) => s.resolve(name),
+            Self::Local(s) => s.resolve(name).await,
+            Self::Workspace(s) => s.resolve(name).await,
+            Self::Git(s) => s.resolve(name).await,
+            Self::Github(s) => s.resolve(name).await,
+            Self::Registry(s) => s.resolve(name).await,
+            Self::Url(s) => s.resolve(name).await,
         }
     }
 
-    pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub async fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         match self {
-            Self::Local(s) => s.fetch(identity),
-            Self::Workspace(s) => s.fetch(identity),
-            Self::Git(s) => s.fetch(identity),
-            Self::Github(s) => s.fetch(identity),
-            Self::Registry(s) => s.fetch(identity),
-            Self::Url(s) => s.fetch(identity),
+            Self::Local(s) => s.fetch(identity).await,
+            Self::Workspace(s) => s.fetch(identity).await,
+            Self::Git(s) => s.fetch(identity).await,
+            Self::Github(s) => s.fetch(identity).await,
+            Self::Registry(s) => s.fetch(identity).await,
+            Self::Url(s) => s.fetch(identity).await,
         }
     }
 }

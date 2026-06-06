@@ -15,11 +15,11 @@ impl GitSource {
     }
 
     #[allow(clippy::unnecessary_wraps)]
-    pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
+    pub async fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.commit.clone())
     }
 
-    pub fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub async fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let tmp_dir = tempfile::Builder::new()
             .prefix("ara-git-")
             .tempdir()
@@ -127,8 +127,8 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn test_fetch_local_git_repo() {
+    #[tokio::test]
+    async fn test_fetch_local_git_repo() {
         let repo_dir = tempfile::tempdir().unwrap();
         create_git_repo(repo_dir.path());
 
@@ -143,18 +143,18 @@ mod tests {
             requested_ref: None,
         };
 
-        let result = src.fetch(&identity).unwrap();
-        assert!(result.len() > 0);
+        let result = src.fetch(&identity).await.unwrap();
+        assert!(!result.is_empty());
         assert_eq!(result[0], 0x1f);
         assert_eq!(result[1], 0x8b);
     }
 
-    #[test]
-    fn test_resolve_returns_commit() {
+    #[tokio::test]
+    async fn test_resolve_returns_commit() {
         let src = GitSource::new(
             "https://example.com/repo.git".to_string(),
             "abc123".to_string(),
         );
-        assert_eq!(src.resolve("any").unwrap(), "abc123");
+        assert_eq!(src.resolve("any").await.unwrap(), "abc123");
     }
 }

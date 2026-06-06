@@ -17,11 +17,11 @@ impl LocalSource {
     }
 
     #[allow(clippy::unnecessary_wraps)]
-    pub fn resolve(&self, _name: &str) -> Result<String, SourceError> {
+    pub async fn resolve(&self, _name: &str) -> Result<String, SourceError> {
         Ok(self.path.clone())
     }
 
-    pub fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+    pub async fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
         let dir = Path::new(&self.path);
         let mut buf = Vec::new();
         let encoder = GzEncoder::new(&mut buf, Compression::best());
@@ -49,8 +49,8 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn test_fetch_produces_valid_tar() {
+    #[tokio::test]
+    async fn test_fetch_produces_valid_tar() {
         let tmp = create_temp_package();
         let path = tmp.path().to_str().unwrap().to_string();
         let src = LocalSource::new(path);
@@ -63,8 +63,8 @@ mod tests {
             requested_ref: None,
         };
 
-        let tarball = src.fetch(&id).unwrap();
-        assert!(tarball.len() > 0);
+        let tarball = src.fetch(&id).await.unwrap();
+        assert!(!tarball.is_empty());
         assert!(tarball.len() > 64);
         assert_eq!(tarball[0], 0x1f); // gzip magic
         assert_eq!(tarball[1], 0x8b);

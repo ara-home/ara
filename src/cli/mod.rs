@@ -71,7 +71,7 @@ pub enum Commands {
 }
 
 impl Cli {
-    pub fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         match &self.command {
             Commands::Install {
                 deps,
@@ -96,8 +96,9 @@ impl Cli {
                         *offline,
                         *non_interactive,
                     )
+                    .await
                 } else {
-                    install::cmd_install(*non_interactive)
+                    install::cmd_install(*non_interactive).await
                 }
             }
             Commands::Run { script, profile } => run::cmd_run(script, profile),
