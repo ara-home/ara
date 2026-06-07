@@ -188,4 +188,57 @@ mod tests {
             other => panic!("expected InvalidPackage, got {other:?}"),
         }
     }
+
+    #[test]
+    fn test_parse_empty_package_version() {
+        let src = r#"
+            version = 1
+
+            [graph]
+            resolver = "mvs"
+
+            [[package]]
+            name = "foo"
+            version = ""
+            source = "npm"
+            package_hash = "sha256:abc"
+        "#;
+        match parse(src) {
+            Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("version is empty") => {}
+            other => panic!("expected InvalidPackage version is empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_package_source() {
+        let src = r#"
+            version = 1
+
+            [graph]
+            resolver = "mvs"
+
+            [[package]]
+            name = "foo"
+            version = "1.0.0"
+            source = ""
+            package_hash = "sha256:abc"
+        "#;
+        match parse(src) {
+            Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("source is empty") => {}
+            other => panic!("expected InvalidPackage source is empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_toml() {
+        let src = r#"
+            version = 1
+            [graph]
+            resolver = "mvs
+        "#;
+        match parse(src) {
+            Err(LockfileParseError::Toml(_)) => {}
+            other => panic!("expected Toml error, got {other:?}"),
+        }
+    }
 }
