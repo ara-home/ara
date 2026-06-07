@@ -55,6 +55,37 @@ ara run build --profile hermetic
 
 Ara can resolve and fetch dependencies from npm registries, GitHub repositories, git repositories, tarball URLs, local paths, and workspace members — all defined in a single manifest file or installed directly via spec.
 
+### Workspace protocol
+
+Ara supports the `workspace:` protocol (inspired by pnpm), which lets you declare dependencies on sibling workspace members without reaching out to a registry:
+
+```json
+{
+  "name": "monorepo",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "lib-a": "workspace:^",
+    "lib-b": "workspace:*",
+    "zod": "^3.0.0"
+  }
+}
+```
+
+Supported forms:
+
+| Form | Meaning |
+|------|---------|
+| `workspace:*` | Always resolves to the local workspace member |
+| `workspace:^` | Resolves to the member and will be replaced with `^<version>` on publish |
+| `workspace:1.2.3` | Pins to exact version in the workspace member |
+
+When installing, workspace dependencies become **live symlinks** — `node_modules/lib-a` points directly to `packages/lib-a`. Changes to the member source files are immediately visible to consumers, no reinstall needed.
+
+The root `package.json` can mix workspace and npm deps freely. The lockfile records each dep with its correct `source`:
+- Workspace deps → `source = "workspace"`
+- Registry deps → `source = "registry"`
+
 ---
 
 ## Architecture
@@ -81,12 +112,13 @@ src/
 #### Manifest install (`ara install` with no args)
 
 1. **Parse** the manifest — reads `package.json` as the primary source for dependencies and scripts, and merges advanced settings from `ara.toml` if it exists.
-2. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
-3. **Fetch** tarballs from the appropriate source backend (registry, git, GitHub, local, workspace)
-4. **Analyze** every fetched package by scanning its source files against 16+ security patterns
-5. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
-6. **Extract** approved packages to the output directory and store them in the content-addressable store
-7. **Lock** the resolved graph into `ara.lock` for future reproducibility
+2. **Expand workspace members** — globs `workspaces` patterns and creates implicit deps for each discovered member
+3. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
+4. **Fetch or symlink**: workspace deps become **live symlinks** from `node_modules/<name>` to the member directory; all other sources fetch tarballs from the appropriate backend
+5. **Analyze** every package by scanning its source files against 16+ security patterns (including symlinked workspace members)
+6. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
+7. **Extract** approved packages to the output directory and store them in the content-addressable store
+8. **Lock** the resolved graph into `ara.lock` for future reproducibility
 
 #### Direct spec install (`ara install <spec>`)
 
@@ -246,9 +278,9 @@ Ara embraces a **hybrid manifest architecture** to maximize compatibility with t
 Ara reads `package.json` natively. When you run `ara install react`, Ara will write the dependency directly to your `package.json`, just like npm or Yarn. All standard fields are mapped and respected:
 
 - `name` and `version`
-- `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`
+- `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies` — including `workspace:` protocol versions (e.g. `"lib-a": "workspace:^"`)
 - `scripts`
-- `workspaces`
+- `workspaces` — glob patterns listing workspace member directories
 
 ### `ara.toml` (Advanced Configuration)
 
