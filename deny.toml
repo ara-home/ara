@@ -31,6 +31,7 @@ skip = [
     { name = "getrandom" },
     { name = "windows-sys" },
     { name = "wit-bindgen" },
+    { name = "hashbrown" },
 ]
 
 [sources]
