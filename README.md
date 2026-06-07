@@ -86,6 +86,74 @@ The root `package.json` can mix workspace and npm deps freely. The lockfile reco
 - Workspace deps → `source = "workspace"`
 - Registry deps → `source = "registry"`
 
+<details>
+<summary><b>Example:</b> monorepo with workspace members + npm dependency</summary>
+
+```
+my-mono/
+├── package.json
+├── packages/
+│   ├── ui/
+│   │   └── package.json
+│   └── server/
+│       └── package.json
+```
+
+```json
+// package.json — root
+{
+  "name": "my-mono",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "zod": "^3.0.0"
+  }
+}
+```
+
+```json
+// packages/ui/package.json
+{ "name": "ui", "version": "1.0.0" }
+
+// packages/server/package.json
+{
+  "name": "server",
+  "version": "0.1.0",
+  "dependencies": {
+    "ui": "workspace:*"
+  }
+}
+```
+
+```bash
+ara install --non-interactive
+# ui    -> symlink para packages/ui
+# server -> symlink para packages/server
+# zod   -> fetched and extracted normally
+```
+</details>
+
+---
+
+<details>
+<summary><b>Example:</b> install dependencies in 30 seconds</summary>
+
+```bash
+# Cria um projeto npm padrão
+mkdir my-app && cd my-app
+npm init -y
+
+# Instala com Ara (lê package.json nativamente)
+ara install
+
+# Adiciona um pacote novo
+ara add zod
+
+# Ver o que foi instalado
+cat ara.lock
+```
+</details>
+
 ---
 
 ## Architecture
@@ -159,6 +227,25 @@ The analyzer then runs each file through a set of compiled regex patterns. Curre
 | `install-scripts` | Medium | Pre/post-install scripts |
 
 Each finding produces a structured report. Findings are deduplicated per file and per pattern, so the same `eval()` call in the same line only generates one warning.
+
+<details>
+<summary><b>Example:</b> Ara blocks a package with <code>eval()</code></summary>
+
+```bash
+$ ara add malicious-pkg
+
+🔍 Scanning malicious-pkg@1.0.0...
+  ⚠  eval-usage (critical) — eval() call in lib/utils.js:42
+  ⚠  credential-access (high) — process.env access in lib/config.js:10
+
+Allow malicious-pkg@1.0.0?
+  [y] Yes, install anyway
+  [n] No, skip this package
+  [s] Sandbox (restrict at runtime)
+> n
+✗ malicious-pkg@1.0.0 — denied
+```
+</details>
 
 ---
 
@@ -258,6 +345,21 @@ Full security audit — same as `analyze` but with an extended report format.
 
 Garbage-collect the content-addressable store (remove orphaned objects).
 
+<details>
+<summary><b>Example:</b> dry-run and aggressive GC</summary>
+
+```bash
+# Preview what would be removed
+ara gc --dry-run
+
+# Run garbage collection (normal mode)
+ara gc
+
+# Remove everything not referenced by any lockfile
+ara gc --aggressive
+```
+</details>
+
 ### Coming soon
 
 - `ara build` — execute build steps with sandboxing and output hashing
@@ -301,6 +403,27 @@ require_review = true          # Always prompt for review
 hermetic = true               # Run build in hermetic sandbox
 offline_first = true           # Prefer local cache over network
 ```
+
+<details>
+<summary><b>Example:</b> project with security threshold + sandbox</summary>
+
+```toml
+# ara.toml
+[security]
+risk_threshold = "high"       # Only warn on High+ findings
+
+[build]
+hermetic = true                # No network, deterministic clock
+```
+
+```bash
+# build honors the hermetic profile from ara.toml
+ara run build --profile hermetic
+
+# test overrides with restricted
+ara run test --profile restricted
+```
+</details>
 
 ---
 
