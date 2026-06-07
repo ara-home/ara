@@ -79,8 +79,13 @@ impl StoreIndex {
             IndexError::Migration(format!("failed to read {}: {e}", legacy_path.display()))
         })?;
 
-        let map: std::collections::HashMap<String, String> =
-            serde_json::from_str(&content).unwrap_or_default();
+        let map: std::collections::HashMap<String, String> = serde_json::from_str(&content)
+            .map_err(|e| {
+                IndexError::Migration(format!(
+                    "corrupt legacy index {}: {e}. Delete this file to recover.",
+                    legacy_path.display()
+                ))
+            })?;
 
         if map.is_empty() {
             let bak = legacy_path.with_extension("json.empty");
