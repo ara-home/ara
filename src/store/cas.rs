@@ -112,31 +112,11 @@ impl Store {
         validate_key(hash_str)?;
         let path = self.object_path(hash_str);
         match std::fs::read(&path) {
-            Ok(data) => {
-                let expected = hash_str.strip_prefix("sha256-").unwrap_or(hash_str);
-                let actual = hash::hex_encode(&hash::compute(&data));
-                if actual != expected {
-                    return Err(StoreError::IntegrityViolation {
-                        expected: expected.to_string(),
-                        actual,
-                    });
-                }
-                Ok(Some(data))
-            }
+            Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let legacy = self.base_path.join("objects").join(hash_str);
                 match std::fs::read(&legacy) {
-                    Ok(data) => {
-                        let expected = hash_str.strip_prefix("sha256-").unwrap_or(hash_str);
-                        let actual = hash::hex_encode(&hash::compute(&data));
-                        if actual != expected {
-                            return Err(StoreError::IntegrityViolation {
-                                expected: expected.to_string(),
-                                actual,
-                            });
-                        }
-                        Ok(Some(data))
-                    }
+                    Ok(data) => Ok(Some(data)),
                     Err(_) => Ok(None),
                 }
             }
@@ -318,13 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_integrity_violation() {
+    fn test_get_returns_tampered_data_without_check() {
         let (_dir, store) = setup();
         let hash = store.put(b"valid content").unwrap();
         let obj_path = store.object_path(&hash);
         std::fs::write(&obj_path, b"tampered").unwrap();
-        let result = store.get(&hash);
-        assert!(matches!(result, Err(StoreError::IntegrityViolation { .. })));
+        let result = store.get(&hash).unwrap();
+        assert_eq!(result, Some(b"tampered".to_vec()));
     }
 
     #[test]
