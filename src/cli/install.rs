@@ -944,7 +944,8 @@ pub(crate) async fn cmd_install_specs(
     // Seed pkg_entries from existing lockfile so we don't lose prior entries
     let lock_path = cwd.join("ara.lock");
     let mut pkg_entries: Vec<PackageEntry> = if lock_path.exists() {
-        let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        let lock_content = std::fs::read_to_string(&lock_path)
+            .with_context(|| format!("failed to read lockfile: {}", lock_path.display()))?;
         if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
             existing.packages
         } else {
@@ -1555,7 +1556,16 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
     let lock_path = cwd.join("ara.lock");
     if lock_path.exists() && node_modules.exists() {
-        let lock_content = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        let lock_content = match std::fs::read_to_string(&lock_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "  warning: could not read lockfile ({}), will re-install",
+                    e
+                );
+                String::new()
+            }
+        };
         if let Ok(existing) = crate::lockfile::parser::parse(&lock_content) {
             let all_match = existing.packages.iter().all(|p| {
                 graph.find_node(&p.name).is_some_and(|idx| {
