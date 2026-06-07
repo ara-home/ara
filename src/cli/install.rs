@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -212,18 +212,44 @@ fn expand_workspace_members(
     entries
 }
 
-struct TarballEntry {
-    path: std::path::PathBuf,
-    entry_type: tar::EntryType,
-    data: Vec<u8>,
-    mode: u32,
-}
-
 fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
+    // Pass 1: detect prefix without allocating file data
+    let prefix = {
+        let decoder = flate2::read::GzDecoder::new(tarball);
+        let mut archive = tar::Archive::new(decoder);
+        let mut common = None;
+        let mut has_files = false;
+
+        let mut is_first = true;
+        if let Ok(entries) = archive.entries() {
+            for entry in entries.flatten() {
+                if let Ok(path) = entry.path() {
+                    let comp = path.components().next();
+                    if is_first {
+                        common = comp.map(|c| c.as_os_str().to_os_string());
+                        is_first = false;
+                    } else if common.is_some() {
+                        if comp.map(|c| c.as_os_str()) != common.as_deref() {
+                            common = None;
+                        }
+                    }
+                    if path.components().count() > 1 {
+                        has_files = true;
+                    }
+                }
+            }
+        }
+
+        if let (Some(comp), true) = (common, has_files) {
+            std::path::PathBuf::from(comp)
+        } else {
+            std::path::PathBuf::new()
+        }
+    };
+
+    // Pass 2: extract streaming directly to disk
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
-
-    let mut raw_entries: Vec<TarballEntry> = Vec::new();
     for entry in archive
         .entries()
         .context("failed to read tarball entries")?
@@ -233,72 +259,21 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
             .path()
             .context("failed to read entry path")?
             .into_owned();
-        let entry_type = entry.header().entry_type();
-        let mode = entry.header().mode()?;
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data)?;
-        raw_entries.push(TarballEntry {
-            path,
-            entry_type,
-            data,
-            mode,
-        });
-    }
 
-    let prefix = detect_tarball_prefix(&raw_entries);
-
-    for entry in &raw_entries {
-        let stripped = entry.path.strip_prefix(&prefix).unwrap_or(&entry.path);
+        let stripped = path.strip_prefix(&prefix).unwrap_or(&path);
         if stripped.as_os_str().is_empty() {
             continue;
         }
+
         let target = dest.join(stripped);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if entry.entry_type == tar::EntryType::Directory {
-            std::fs::create_dir_all(&target)?;
-        } else {
-            std::fs::write(&target, &entry.data)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(entry.mode))?;
-            }
-        }
+
+        entry.unpack(&target).context("failed to unpack entry")?;
     }
+
     Ok(())
-}
-
-fn detect_tarball_prefix(entries: &[TarballEntry]) -> std::path::PathBuf {
-    if entries.is_empty() {
-        return std::path::PathBuf::new();
-    }
-
-    let first_comp = entries.first().and_then(|e| e.path.components().next());
-
-    let common = first_comp.filter(|comp| {
-        entries.iter().all(|e| {
-            let mut comps = e.path.components();
-            let first = comps.next();
-            // It must match the first component.
-            // If it has NO other components (i.e. it is the directory itself), that's fine.
-            first == Some(*comp)
-        })
-    });
-
-    match common {
-        Some(comp) => {
-            // Check if there are actually files inside this directory.
-            let has_files = entries.iter().any(|e| e.path.components().count() > 1);
-            if has_files {
-                std::path::PathBuf::from(comp.as_os_str())
-            } else {
-                std::path::PathBuf::new()
-            }
-        }
-        None => std::path::PathBuf::new(),
-    }
 }
 
 /// Create symlinks in `node_modules/.bin/` for the package's `bin` entries.
