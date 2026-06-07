@@ -731,27 +731,21 @@ async fn install_transitive_deps(
     // Download → extract → bin links (I/O pool, 32 threads)
     let t_dle = Instant::now();
     let cache_hits = Arc::new(AtomicU32::new(0));
-    let total_resolve = resolution.len();
-    let (tx, rx) = std::sync::mpsc::channel::<Option<(String, String, String)>>();
+    let initial_pkgs: HashSet<String> = pkg_entries.iter().map(|e| e.name.clone()).collect();
+    let mut total_tasks = 0usize;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<(String, String, String)>>(1024);
     let idx_store = Arc::clone(store_index);
     let nm = node_modules;
     let cache_hits_ref = Arc::clone(&cache_hits);
     let mut tasks = Vec::new();
     for (dep_name, exact_ver) in &resolution {
-        let dep_dir = nm.join(dep_name);
-        if dep_dir.exists() {
+        if initial_pkgs.contains(dep_name) {
             continue;
         }
+        total_tasks += 1;
         let parsed_ver = match Version::parse(exact_ver) {
             Ok(v) => v,
             Err(_) => continue,
-        };
-        let identity = PackageIdentity {
-            source: SourceType::Npm,
-            name: dep_name.clone(),
-            version: parsed_ver.clone(),
-            content_hash: None,
-            requested_ref: None,
         };
         let short_ver = format!(
             "{}.{}.{}",
@@ -767,18 +761,55 @@ async fn install_transitive_deps(
         let nm = nm.to_path_buf();
 
         tasks.push(tokio::spawn(async move {
-            let cache_lookup = idx.lookup(&cache_key).ok().flatten();
+            let dep_dir = nm.join(&dep_name);
+            if dep_dir.exists() {
+                let hash_str = tokio::task::spawn_blocking({
+                    let idx = idx.clone();
+                    let ck = cache_key.clone();
+                    move || idx.lookup(&ck).ok().flatten().unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let _ = tx.send(Some((dep_name, short_ver, hash_str))).await;
+                return;
+            }
+
+            let identity = PackageIdentity {
+                source: SourceType::Npm,
+                name: dep_name.clone(),
+                version: parsed_ver.clone(),
+                content_hash: None,
+                requested_ref: None,
+            };
+
+            let cache_lookup = tokio::task::spawn_blocking({
+                let idx = idx.clone();
+                let ck = cache_key.clone();
+                move || idx.lookup(&ck).ok().flatten()
+            })
+            .await
+            .ok()
+            .flatten();
+
             let result = if let Some(cached_hash) = cache_lookup {
-                if store_ref.contains(&cached_hash) {
+                let contains = tokio::task::spawn_blocking({
+                    let s = store_ref.clone();
+                    let h = cached_hash.clone();
+                    move || s.contains(&h)
+                })
+                .await
+                .unwrap_or(false);
+
+                if contains {
                     ch.fetch_add(1, Ordering::Relaxed);
                     cached_hash
                 } else {
-                    if let Err(e) = idx.remove(&cache_key) {
-                        eprintln!(
-                            "    warning: failed to remove stale cache entry for {}: {}",
-                            dep_name, e
-                        );
-                    }
+                    let _ = tokio::task::spawn_blocking({
+                        let idx = idx.clone();
+                        let ck = cache_key.clone();
+                        move || idx.remove(&ck)
+                    }).await;
+
                     match reg_ref.fetch(&identity).await {
                         Ok(content) => match tokio::task::spawn_blocking({
                             let s = store_ref.clone();
@@ -790,12 +821,17 @@ async fn install_transitive_deps(
                         .and_then(|r| r.ok())
                         {
                             Some(h) => {
-                                if let Err(e) = idx.insert(&cache_key, &h, "npm", 0) {
-                                    eprintln!(
-                                        "    warning: failed to cache index entry for {}: {}",
-                                        dep_name, e
-                                    );
-                                }
+                                let _ = tokio::task::spawn_blocking({
+                                    let idx = idx.clone();
+                                    let ck = cache_key.clone();
+                                    let dn = dep_name.clone();
+                                    let h_clone = h.clone();
+                                    move || {
+                                        if let Err(e) = idx.insert(&ck, &h_clone, "npm", 0) {
+                                            eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
+                                        }
+                                    }
+                                }).await;
                                 h
                             }
                             None => {
@@ -821,12 +857,17 @@ async fn install_transitive_deps(
                     .and_then(|r| r.ok())
                     {
                         Some(h) => {
-                            if let Err(e) = idx.insert(&cache_key, &h, "npm", 0) {
-                                eprintln!(
-                                    "    warning: failed to cache index entry for {}: {}",
-                                    dep_name, e
-                                );
-                            }
+                            let _ = tokio::task::spawn_blocking({
+                                let idx = idx.clone();
+                                let ck = cache_key.clone();
+                                let dn = dep_name.clone();
+                                let h_clone = h.clone();
+                                move || {
+                                    if let Err(e) = idx.insert(&ck, &h_clone, "npm", 0) {
+                                        eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
+                                    }
+                                }
+                            }).await;
                             h
                         }
                         None => {
@@ -860,31 +901,37 @@ async fn install_transitive_deps(
                     return;
                 }
             }
-            if let Err(e) = install_bin_links(&nm, dep_name.as_str(), &dep_dir) {
-                eprintln!(
-                    "    warning: failed to create bin links for {}: {}",
-                    dep_name, e
-                );
+
+            let nm_clone = nm.clone();
+            let dep_name_clone = dep_name.clone();
+            let dep_dir_clone2 = dep_dir.clone();
+            let bin_links = tokio::task::spawn_blocking(move || {
+                install_bin_links(&nm_clone, dep_name_clone.as_str(), &dep_dir_clone2)
+            }).await;
+
+            if let Ok(Err(e)) = bin_links {
+                eprintln!("    warning: failed to create bin links for {}: {}", dep_name, e);
             }
-            tx.send(Some((dep_name, short_ver, result))).ok();
+
+            let _ = tx.send(Some((dep_name, short_ver, result))).await;
         }));
     }
     drop(tx);
-    futures::future::join_all(tasks).await;
+
     let mut results: Vec<(String, String, String)> = Vec::new();
     let mut last_progress = 0usize;
-    for item in rx.iter() {
+    while let Some(item) = rx.recv().await {
         if let Some(entry) = item {
             results.push(entry);
         }
         let done = results.len();
-        let remaining = total_resolve.saturating_sub(done);
+        let remaining = total_tasks.saturating_sub(done);
         if done - last_progress >= 20 || remaining == 0 {
-            eprintln!("  progress: {done}/{total_resolve}, {remaining} remaining");
+            eprintln!("  progress: {done}/{total_tasks}, {remaining} remaining");
             last_progress = done;
         }
     }
-    let fresh = total_resolve.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
+    let fresh = total_tasks.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
     eprintln!(
         "  [profile] phase 3b download+extract: {:?} (hits: {}, fresh: {})",
         t_dle.elapsed(),
