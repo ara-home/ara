@@ -35,6 +35,8 @@ fn shared_client() -> Result<reqwest::Client, HttpError> {
         .timeout(Duration::from_secs(120))
         .user_agent("ara-package-manager/0.1.0")
         .default_headers(headers)
+        .pool_max_idle_per_host(512)
+        .tcp_keepalive(Duration::from_secs(60))
         .build()?;
 
     let _ = CLIENT.set(client.clone());

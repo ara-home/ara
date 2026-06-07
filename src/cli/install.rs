@@ -1594,6 +1594,13 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let mut graph = r.resolve();
     println!("Resolved {} packages", graph.nodes.len());
 
+    // Warm up the connection pool to prevent the Thundering Herd
+    let default_url = std::env::var("ARA_NPM_REGISTRY")
+        .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+    if let Ok(reg) = crate::source::registry::RegistrySource::new(default_url) {
+        let _ = reg.warmup().await;
+    }
+
     // Connect resolve(): enhance each node's version from registry sources
     let t_resolve = Instant::now();
     let dep_lookup: HashMap<&str, &crate::manifest::types::DependencyEntry> =

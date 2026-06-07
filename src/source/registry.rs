@@ -25,6 +25,13 @@ impl RegistrySource {
         })
     }
 
+    /// Pre-warms the HTTP/2 connection to avoid the "Thundering Herd" connection pool problem
+    /// where concurrent initial requests cause reqwest to open dozens of TCP sockets
+    /// instead of multiplexing over a single HTTP/2 connection.
+    pub async fn warmup(&self) {
+        let _ = self.client.get(&self.registry_url).await;
+    }
+
     /// Fetch package metadata from the registry, using a local disk cache
     /// for the default npm registry to avoid redundant HTTP requests.
     pub(crate) async fn fetch_metadata(
