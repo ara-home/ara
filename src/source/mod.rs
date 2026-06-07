@@ -21,6 +21,8 @@ pub enum SourceError {
     GitError(String),
     #[error("network error: {0}")]
     NetworkError(String),
+    #[error("parse error: {0}")]
+    ParseError(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
