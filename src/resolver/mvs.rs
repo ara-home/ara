@@ -52,6 +52,11 @@ impl Resolver {
                     dependencies: Vec::new(),
                 };
                 graph.add_node(node);
+            } else {
+                eprintln!(
+                    "  warning: no version satisfies constraints for {}",
+                    c.package
+                );
             }
         }
 

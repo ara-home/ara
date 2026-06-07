@@ -559,14 +559,17 @@ async fn install_transitive_deps(
                     if !exact_ver_exists {
                         return None;
                     }
-                    if let Some(pm) = tokio::task::spawn_blocking({
+                    match tokio::task::spawn_blocking({
                         let n = name.clone();
                         move || read_package_meta(&n)
                     })
                     .await
-                    .ok()?
                     {
-                        return Some((name, pm));
+                        Ok(Some(pm)) => return Some((name, pm)),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("  warning: failed to read cached metadata for {name} (task panic): {e}");
+                        }
                     }
                     if let Ok(meta) = reg.fetch_metadata(&name).await {
                         let pm = extract_package_meta(&meta);
@@ -584,7 +587,13 @@ async fn install_transitive_deps(
             let fetched: Vec<(String, PackageMeta)> = futures::future::join_all(tasks)
                 .await
                 .into_iter()
-                .filter_map(|x| x.ok().flatten())
+                .filter_map(|x| match x {
+                    Ok(inner) => inner,
+                    Err(e) => {
+                        eprintln!("  warning: metadata fetch task panic: {e}");
+                        None
+                    }
+                })
                 .collect();
             t_fetch += t0.elapsed();
             for (name, pm) in fetched {
@@ -631,14 +640,17 @@ async fn install_transitive_deps(
                 let name = name.clone();
                 let reg = reg.clone();
                 tasks.push(tokio::spawn(async move {
-                    if let Some(pm) = tokio::task::spawn_blocking({
+                    match tokio::task::spawn_blocking({
                         let n = name.clone();
                         move || read_package_meta(&n)
                     })
                     .await
-                    .ok()?
                     {
-                        return Some((name, pm));
+                        Ok(Some(pm)) => return Some((name, pm)),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("  warning: failed to read cached metadata for {name} (task panic): {e}");
+                        }
                     }
                     if let Ok(meta) = reg.fetch_metadata(&name).await {
                         let pm = extract_package_meta(&meta);
@@ -656,7 +668,13 @@ async fn install_transitive_deps(
             let fetched: Vec<(String, PackageMeta)> = futures::future::join_all(tasks)
                 .await
                 .into_iter()
-                .filter_map(|x| x.ok().flatten())
+                .filter_map(|x| match x {
+                    Ok(inner) => inner,
+                    Err(e) => {
+                        eprintln!("  warning: metadata fetch task panic: {e}");
+                        None
+                    }
+                })
                 .collect();
             t_fetch += t0.elapsed();
             for (name, pm) in fetched {
@@ -669,7 +687,13 @@ async fn install_transitive_deps(
             .iter()
             .filter_map(|(dep_name, dep_range)| {
                 let pm = meta_cache.get(dep_name)?;
-                let constraint = Constraint::parse(dep_range).ok()?;
+                let constraint = match Constraint::parse(dep_range) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("  warning: failed to parse constraint '{dep_range}' for {dep_name}: {e}");
+                        return None;
+                    }
+                };
                 // Versions are sorted ascending, find highest matching
                 let best = pm
                     .versions
@@ -749,7 +773,12 @@ async fn install_transitive_deps(
                     ch.fetch_add(1, Ordering::Relaxed);
                     cached_hash
                 } else {
-                    let _ = idx.remove(&cache_key);
+                    if let Err(e) = idx.remove(&cache_key) {
+                        eprintln!(
+                            "    warning: failed to remove stale cache entry for {}: {}",
+                            dep_name, e
+                        );
+                    }
                     match reg_ref.fetch(&identity).await {
                         Ok(content) => match tokio::task::spawn_blocking({
                             let s = store_ref.clone();
@@ -761,7 +790,12 @@ async fn install_transitive_deps(
                         .and_then(|r| r.ok())
                         {
                             Some(h) => {
-                                let _ = idx.insert(&cache_key, &h, "npm", 0);
+                                if let Err(e) = idx.insert(&cache_key, &h, "npm", 0) {
+                                    eprintln!(
+                                        "    warning: failed to cache index entry for {}: {}",
+                                        dep_name, e
+                                    );
+                                }
                                 h
                             }
                             None => {
@@ -787,7 +821,12 @@ async fn install_transitive_deps(
                     .and_then(|r| r.ok())
                     {
                         Some(h) => {
-                            let _ = idx.insert(&cache_key, &h, "npm", 0);
+                            if let Err(e) = idx.insert(&cache_key, &h, "npm", 0) {
+                                eprintln!(
+                                    "    warning: failed to cache index entry for {}: {}",
+                                    dep_name, e
+                                );
+                            }
                             h
                         }
                         None => {
@@ -989,12 +1028,17 @@ pub(crate) async fn cmd_install_specs(
         let (pkg_content, hash_str) = if force {
             let content = fetch_meta_content(&meta).await?;
             let hash = store.put(&content)?;
-            let _ = store_index.insert(
+            if let Err(e) = store_index.insert(
                 &cache_key,
                 &hash,
                 &meta.source_type.to_string(),
                 content.len() as i64,
-            );
+            ) {
+                eprintln!(
+                    "  warning: failed to index forced fetch entry for {}: {}",
+                    meta.name, e
+                );
+            }
             println!("  fetching {}@{} (forced)...", meta.name, ver_str);
             (content, hash)
         } else {
@@ -1006,27 +1050,42 @@ pub(crate) async fn cmd_install_specs(
                             println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
                             let content = fetch_meta_content(&meta).await?;
                             let hash = store.put(&content)?;
-                            let _ = store_index.insert(
+                            if let Err(e) = store_index.insert(
                                 &cache_key,
                                 &hash,
                                 &meta.source_type.to_string(),
                                 content.len() as i64,
-                            );
+                            ) {
+                                eprintln!(
+                                    "  warning: failed to index refreshed entry for {}: {}",
+                                    meta.name, e
+                                );
+                            }
                             (content, hash)
                         } else {
                             println!("  using cached {}@{}", meta.name, ver_str);
                             (content, cached_hash)
                         }
                     } else {
-                        let _ = store_index.remove(&cache_key);
+                        if let Err(e) = store_index.remove(&cache_key) {
+                            eprintln!(
+                                "  warning: failed to remove stale cache key for {}: {}",
+                                meta.name, e
+                            );
+                        }
                         let content = fetch_meta_content(&meta).await?;
                         let hash = store.put(&content)?;
-                        let _ = store_index.insert(
+                        if let Err(e) = store_index.insert(
                             &cache_key,
                             &hash,
                             &meta.source_type.to_string(),
                             content.len() as i64,
-                        );
+                        ) {
+                            eprintln!(
+                                "  warning: failed to index re-fetched entry for {}: {}",
+                                meta.name, e
+                            );
+                        }
                         (content, hash)
                     }
                 } else if offline {
@@ -1036,15 +1095,25 @@ pub(crate) async fn cmd_install_specs(
                         ver_str
                     );
                 } else {
-                    let _ = store_index.remove(&cache_key);
+                    if let Err(e) = store_index.remove(&cache_key) {
+                        eprintln!(
+                            "  warning: failed to remove stale cache key for {}: {}",
+                            meta.name, e
+                        );
+                    }
                     let content = fetch_meta_content(&meta).await?;
                     let hash = store.put(&content)?;
-                    let _ = store_index.insert(
+                    if let Err(e) = store_index.insert(
                         &cache_key,
                         &hash,
                         &meta.source_type.to_string(),
                         content.len() as i64,
-                    );
+                    ) {
+                        eprintln!(
+                            "  warning: failed to index re-fetched entry for {}: {}",
+                            meta.name, e
+                        );
+                    }
                     (content, hash)
                 }
             } else if offline {
@@ -1056,12 +1125,17 @@ pub(crate) async fn cmd_install_specs(
             } else {
                 let content = fetch_meta_content(&meta).await?;
                 let hash = store.put(&content)?;
-                let _ = store_index.insert(
+                if let Err(e) = store_index.insert(
                     &cache_key,
                     &hash,
                     &meta.source_type.to_string(),
                     content.len() as i64,
-                );
+                ) {
+                    eprintln!(
+                        "  warning: failed to index fresh fetch entry for {}: {}",
+                        meta.name, e
+                    );
+                }
                 println!("  fetching {}@{}...", meta.name, ver_str);
                 (content, hash)
             }
@@ -1641,11 +1715,33 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                 let member_path = cwd.join(rel_path);
                 let pkg_dir = node_modules.join(&node.name);
                 let _ = std::fs::remove_dir_all(&pkg_dir);
-                std::fs::create_dir_all(pkg_dir.parent().unwrap_or(&node_modules)).ok()?;
+                if let Err(e) = std::fs::create_dir_all(pkg_dir.parent().unwrap_or(&node_modules)) {
+                    eprintln!(
+                        "  warning: failed to create dir for workspace link {}: {}",
+                        node.name, e
+                    );
+                    return None;
+                }
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&member_path, &pkg_dir).ok()?;
+                if let Err(e) = std::os::unix::fs::symlink(&member_path, &pkg_dir) {
+                    eprintln!(
+                        "  warning: failed to symlink workspace {} -> {}: {}",
+                        node.name,
+                        member_path.display(),
+                        e
+                    );
+                    return None;
+                }
                 #[cfg(not(unix))]
-                std::fs::hard_link(&member_path, &pkg_dir).ok()?;
+                if let Err(e) = std::fs::hard_link(&member_path, &pkg_dir) {
+                    eprintln!(
+                        "  warning: failed to hardlink workspace {} -> {}: {}",
+                        node.name,
+                        member_path.display(),
+                        e
+                    );
+                    return None;
+                }
                 println!("  symlink {} -> {}", node.name, member_path.display());
 
                 let pkg_dir_clone = pkg_dir.clone();
@@ -1685,7 +1781,12 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                     println!("  using cached {}@{}", node.name, ver_str);
                     cached_hash
                 } else {
-                    let _ = store_index.remove(&cache_key);
+                    if let Err(e) = store_index.remove(&cache_key) {
+                        eprintln!(
+                            "  warning: failed to remove stale cache key for {}: {}",
+                            node.name, e
+                        );
+                    }
                     fetch_and_store_parallel(
                         &store,
                         &store_index,
@@ -1764,7 +1865,13 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let processed: Vec<ProcessedNode> = futures::future::join_all(tasks)
         .await
         .into_iter()
-        .filter_map(|x| x.ok().flatten())
+        .filter_map(|x| match x {
+            Ok(inner) => inner,
+            Err(e) => {
+                eprintln!("  warning: nested dependency task panic: {e}");
+                None
+            }
+        })
         .collect();
     eprintln!(
         "  [profile] phase 1 (direct deps): {:?}",
@@ -1935,12 +2042,17 @@ async fn fetch_and_store_parallel(
         }
     };
 
-    let _ = store_index.insert(
+    if let Err(e) = store_index.insert(
         cache_key,
         &hash_str,
         &node.source.to_string(),
         pkg_content.len() as i64,
-    );
+    ) {
+        eprintln!(
+            "  warning: failed to index fetch result for {}: {}",
+            node.name, e
+        );
+    }
 
     Some(hash_str)
 }
