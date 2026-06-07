@@ -233,7 +233,7 @@ impl Store {
                 for entry in std::fs::read_dir(&flat_dir)? {
                     let entry = entry?;
                     if entry.path().is_dir()
-                        && entry.path().file_name().map_or(false, |n| n.len() == 2)
+                        && entry.path().file_name().is_some_and(|n| n.len() == 2)
                     {
                         continue;
                     }
