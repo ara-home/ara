@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::manifest::types::{
     Build, DepEntryRaw, DependencyEntry, Manifest, Project, ScriptEntry, Security, Workspace,
 };
+use crate::types::Constraint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestParseError {
@@ -10,6 +11,10 @@ pub enum ManifestParseError {
     UnknownSourceType,
     #[error("invalid risk level")]
     InvalidRiskLevel,
+    #[error("invalid name: {0}")]
+    InvalidName(String),
+    #[error("invalid version constraint: {0}")]
+    InvalidConstraint(String),
     #[allow(dead_code)]
     #[error("json parse error: {0}")]
     Json(String),
@@ -55,6 +60,30 @@ struct BuildRaw {
     offline_first: Option<bool>,
 }
 
+fn validate_name(name: &str) -> Result<(), ManifestParseError> {
+    if name.is_empty() {
+        return Err(ManifestParseError::InvalidName("name is empty".to_string()));
+    }
+    if name.contains('\0') {
+        return Err(ManifestParseError::InvalidName(
+            "name contains null byte".to_string(),
+        ));
+    }
+    if name.starts_with('/') {
+        return Err(ManifestParseError::InvalidName(
+            "name must not be an absolute path".to_string(),
+        ));
+    }
+    for component in name.split('/') {
+        if component == ".." || component == "." {
+            return Err(ManifestParseError::InvalidName(
+                "name must not contain path traversal segments".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
     let raw: ManifestRaw = toml::from_str(content)?;
 
@@ -64,6 +93,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                 .name
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| "project".to_string());
+            validate_name(&name)?;
             let version = p
                 .version
                 .filter(|v| !v.is_empty())
@@ -82,9 +112,17 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
         Some(map) => map
             .into_iter()
             .map(|(name, raw)| {
+                validate_name(&name)?;
                 let source = raw.source.unwrap_or_else(|| "npm".to_string());
                 if !valid_sources.contains(&source.as_str()) {
                     return Err(ManifestParseError::UnknownSourceType);
+                }
+                if let Some(ref ver) = raw.version {
+                    if !ver.is_empty() {
+                        Constraint::parse(ver).map_err(|e| {
+                            ManifestParseError::InvalidConstraint(format!("{}: {}", name, e))
+                        })?;
+                    }
                 }
                 Ok(DependencyEntry {
                     name,
@@ -350,8 +388,26 @@ mod tests {
             name = "../../etc/passwd"
             version = "0.1.0"
         "#;
-        let m = parse(src).unwrap();
-        assert_eq!(m.project.name, "../../etc/passwd");
+        match parse(src) {
+            Err(ManifestParseError::InvalidName(_)) => {}
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_constraint() {
+        let src = r#"
+            [project]
+            name = "app"
+            version = "0.1.0"
+
+            [deps]
+            foo = { version = "invalid!!" }
+        "#;
+        match parse(src) {
+            Err(ManifestParseError::InvalidConstraint(_)) => {}
+            other => panic!("expected InvalidConstraint, got {other:?}"),
+        }
     }
 
     #[test]
