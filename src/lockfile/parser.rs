@@ -204,7 +204,8 @@ mod tests {
             package_hash = "sha256:abc"
         "#;
         match parse(src) {
-            Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("version is empty") => {}
+            Err(LockfileParseError::InvalidPackage(ref msg))
+                if msg.contains("version is empty") => {}
             other => panic!("expected InvalidPackage version is empty, got {other:?}"),
         }
     }
@@ -224,7 +225,8 @@ mod tests {
             package_hash = "sha256:abc"
         "#;
         match parse(src) {
-            Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("source is empty") => {}
+            Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("source is empty") => {
+            }
             other => panic!("expected InvalidPackage source is empty, got {other:?}"),
         }
     }

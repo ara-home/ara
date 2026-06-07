@@ -118,7 +118,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let res = resolve_script(dir.path(), "non_existent_script");
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("no ara.toml or package.json found"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("no ara.toml or package.json found"));
     }
 
     #[test]
@@ -137,14 +140,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let manifest_path = dir.path().join("ara.toml");
         let mut f = File::create(manifest_path).unwrap();
-        writeln!(f, r#"
+        writeln!(
+            f,
+            r#"
 [project]
 name = "test"
 version = "1.0.0"
 
 [scripts]
 test = "echo test"
-"#).unwrap();
+"#
+        )
+        .unwrap();
 
         let res = resolve_script(dir.path(), "test").unwrap();
         assert_eq!(res, "echo test");
