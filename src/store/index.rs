@@ -120,10 +120,6 @@ impl StoreIndex {
         match rows.next()? {
             Some(row) => {
                 let hash: String = row.get(0)?;
-                conn.execute(
-                    "UPDATE objects SET last_accessed = datetime('now') WHERE cache_key = ?1",
-                    rusqlite::params![cache_key],
-                )?;
                 Ok(Some(hash))
             }
             None => Ok(None),

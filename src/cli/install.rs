@@ -782,138 +782,116 @@ async fn install_transitive_deps(
                 requested_ref: None,
             };
 
+            // Quick synchronous cache check
             let cache_lookup = tokio::task::spawn_blocking({
                 let idx = idx.clone();
                 let ck = cache_key.clone();
-                move || idx.lookup(&ck).ok().flatten()
+                let s = store_ref.clone();
+                move || {
+                    let hash = idx.lookup(&ck).ok().flatten()?;
+                    if s.contains(&hash) {
+                        Some(hash)
+                    } else {
+                        None
+                    }
+                }
             })
             .await
             .ok()
             .flatten();
 
-            let result = if let Some(cached_hash) = cache_lookup {
-                let contains = tokio::task::spawn_blocking({
-                    let s = store_ref.clone();
-                    let h = cached_hash.clone();
-                    move || s.contains(&h)
+            if let Some(cached_hash) = cache_lookup {
+                // Cache hit: just extract + bin links in one shot
+                ch.fetch_add(1, Ordering::Relaxed);
+                let result_clone = cached_hash.clone();
+                let s = store_ref.clone();
+                let nm_c = nm.clone();
+                let dn = dep_name.clone();
+                let dd = dep_dir.clone();
+                let extraction = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    extract_package_cached(&s, &result_clone, &dd, None)?;
+                    let _ = install_bin_links(&nm_c, &dn, &dd);
+                    Ok(())
                 })
-                .await
-                .unwrap_or(false);
-
-                if contains {
-                    ch.fetch_add(1, Ordering::Relaxed);
-                    cached_hash
-                } else {
-                    let _ = tokio::task::spawn_blocking({
-                        let idx = idx.clone();
-                        let ck = cache_key.clone();
-                        move || idx.remove(&ck)
-                    }).await;
-
-                    match reg_ref.fetch(&identity).await {
-                        Ok(content) => match tokio::task::spawn_blocking({
-                            let s = store_ref.clone();
-                            let c = content;
-                            move || s.put(&c)
-                        })
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok())
-                        {
-                            Some(h) => {
-                                let _ = tokio::task::spawn_blocking({
-                                    let idx = idx.clone();
-                                    let ck = cache_key.clone();
-                                    let dn = dep_name.clone();
-                                    let h_clone = h.clone();
-                                    move || {
-                                        if let Err(e) = idx.insert(&ck, &h_clone, "npm", 0) {
-                                            eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
-                                        }
-                                    }
-                                }).await;
-                                h
-                            }
-                            None => {
-                                eprintln!("    warning: failed to store {}", dep_name);
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
-                            return;
-                        }
+                .await;
+                match extraction {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("    failed to extract {}: {}", dep_name, e);
+                        return;
                     }
-                }
-            } else {
-                match reg_ref.fetch(&identity).await {
-                    Ok(content) => match tokio::task::spawn_blocking({
-                        let s = store_ref.clone();
-                        let c = content;
-                        move || s.put(&c)
-                    })
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    {
-                        Some(h) => {
-                            let _ = tokio::task::spawn_blocking({
-                                let idx = idx.clone();
-                                let ck = cache_key.clone();
-                                let dn = dep_name.clone();
-                                let h_clone = h.clone();
-                                move || {
-                                    if let Err(e) = idx.insert(&ck, &h_clone, "npm", 0) {
-                                        eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
-                                    }
-                                }
-                            }).await;
-                            h
-                        }
-                        None => {
-                            eprintln!("    warning: failed to store {}", dep_name);
-                            return;
-                        }
-                    },
                     Err(e) => {
-                        eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                        eprintln!("    failed to extract {} (task panic): {}", dep_name, e);
                         return;
                     }
                 }
+                let _ = tx.send(Some((dep_name, short_ver, cached_hash))).await;
+                return;
+            }
+
+            // Fresh download: fetch over network, then do ALL disk I/O in one spawn_blocking
+            let content = match reg_ref.fetch(&identity).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                    return;
+                }
             };
 
-            let dep_dir_clone = dep_dir.clone();
-            let store_ref_clone = store_ref.clone();
-            let result_clone = result.clone();
-            let extraction = tokio::task::spawn_blocking(move || {
-                extract_package_cached(&store_ref_clone, &result_clone, &dep_dir_clone)
+            let ck = cache_key.clone();
+            let dn = dep_name.clone();
+            let s = store_ref.clone();
+            let i = idx.clone();
+            let nm_c = nm.clone();
+            let dd = dep_dir.clone();
+            let result = tokio::task::spawn_blocking(move || -> Option<String> {
+                // 1. Hash + store tarball
+                let hash = match s.put(&content) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("    warning: failed to store {}: {}", dn, e);
+                        return None;
+                    }
+                };
+                // 2. Index insert
+                if let Err(e) = i.insert(&ck, &hash, "npm", content.len() as i64) {
+                    eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
+                }
+                // 3. Extract directly from content (no disk re-read!)
+                let extracted_dir = s.get_extracted_path(&hash);
+                if !extracted_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&extracted_dir) {
+                        eprintln!("    failed to create extract dir for {}: {}", dn, e);
+                        return Some(hash);
+                    }
+                    if let Err(e) = extract_tarball(&content, &extracted_dir) {
+                        eprintln!("    failed to extract {}: {}", dn, e);
+                        return Some(hash);
+                    }
+                }
+                drop(content); // free memory before hardlinking
+                               // 4. Hardlink to node_modules
+                let _ = std::fs::remove_dir_all(&dd);
+                if let Err(e) = hardlink_dir(&extracted_dir, &dd) {
+                    eprintln!("    failed to hardlink {}: {}", dn, e);
+                }
+                // 5. Bin links
+                let _ = install_bin_links(&nm_c, &dn, &dd);
+                Some(hash)
             })
             .await;
 
-            match extraction {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    eprintln!("    failed to extract {}: {}", dep_name, e);
-                    return;
+            match result {
+                Ok(Some(hash)) => {
+                    let _ = tx.send(Some((dep_name, short_ver, hash))).await;
+                }
+                Ok(None) => {
+                    eprintln!("    warning: skipped {} (store failed)", dep_name);
                 }
                 Err(e) => {
-                    eprintln!("    failed to extract {} (task panic): {}", dep_name, e);
-                    return;
+                    eprintln!("    failed {} (task panic): {}", dep_name, e);
                 }
             }
-
-            let nm_clone = nm.clone();
-            let dep_name_clone = dep_name.clone();
-            let dep_dir_clone2 = dep_dir.clone();
-            let bin_links = tokio::task::spawn_blocking(move || {
-                install_bin_links(&nm_clone, dep_name_clone.as_str(), &dep_dir_clone2)
-            }).await;
-
-            if let Ok(Err(e)) = bin_links {
-                eprintln!("    warning: failed to create bin links for {}: {}", dep_name, e);
-            }
-
-            let _ = tx.send(Some((dep_name, short_ver, result))).await;
         }));
     }
     drop(tx);
@@ -1823,10 +1801,10 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
             let cached = store_index.lookup(&cache_key).ok().flatten();
 
-            let hash_str = if let Some(cached_hash) = cached {
+            let (hash_str, fresh_content) = if let Some(cached_hash) = cached {
                 if store.contains(&cached_hash) {
                     println!("  using cached {}@{}", node.name, ver_str);
-                    cached_hash
+                    (cached_hash, None)
                 } else {
                     if let Err(e) = store_index.remove(&cache_key) {
                         eprintln!(
@@ -1834,7 +1812,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                             node.name, e
                         );
                     }
-                    fetch_and_store_parallel(
+                    let (h, c) = fetch_and_store_parallel(
                         &store,
                         &store_index,
                         &src,
@@ -1842,11 +1820,20 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                         &node,
                         &ver_str,
                     )
-                    .await?
+                    .await?;
+                    (h, Some(c))
                 }
             } else {
-                fetch_and_store_parallel(&store, &store_index, &src, &cache_key, &node, &ver_str)
-                    .await?
+                let (h, c) = fetch_and_store_parallel(
+                    &store,
+                    &store_index,
+                    &src,
+                    &cache_key,
+                    &node,
+                    &ver_str,
+                )
+                .await?;
+                (h, Some(c))
             };
 
             let pkg_dir = node_modules.join(&node.name);
@@ -1854,7 +1841,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
             let store_clone = store.clone();
             let hash_str_clone = hash_str.clone();
             match tokio::task::spawn_blocking(move || {
-                extract_package_cached(&store_clone, &hash_str_clone, &pkg_dir_clone)
+                extract_package_cached(&store_clone, &hash_str_clone, &pkg_dir_clone, fresh_content)
             })
             .await
             {
@@ -2062,7 +2049,7 @@ async fn fetch_and_store_parallel(
     cache_key: &str,
     node: &crate::resolver::graph::Node,
     ver_str: &str,
-) -> Option<String> {
+) -> Option<(String, Vec<u8>)> {
     println!("  fetching {}@{}...", node.name, ver_str);
 
     let identity = crate::types::PackageIdentity {
@@ -2101,21 +2088,30 @@ async fn fetch_and_store_parallel(
         );
     }
 
-    Some(hash_str)
+    Some((hash_str, pkg_content))
 }
 
 /// Extract a tarball from the CAS store to the package directory.
 /// Uses a cached extracted directory in the store to avoid re-extraction.
-fn extract_package_cached(store: &Store, hash_str: &str, pkg_dir: &Path) -> Result<()> {
+/// When `content` is provided, uses it directly instead of reading from the store.
+fn extract_package_cached(
+    store: &Store,
+    hash_str: &str,
+    pkg_dir: &Path,
+    content: Option<Vec<u8>>,
+) -> Result<()> {
     let extracted_dir = store.get_extracted_path(hash_str);
 
     if !extracted_dir.exists() {
-        let content = store
-            .get(hash_str)?
-            .ok_or_else(|| anyhow::anyhow!("package {hash_str} not in store"))?;
+        let tarball = match content {
+            Some(c) => c,
+            None => store
+                .get(hash_str)?
+                .ok_or_else(|| anyhow::anyhow!("package {hash_str} not in store"))?,
+        };
         std::fs::create_dir_all(&extracted_dir)
             .with_context(|| format!("failed to create {}", extracted_dir.display()))?;
-        extract_tarball(&content, &extracted_dir)
+        extract_tarball(&tarball, &extracted_dir)
             .with_context(|| format!("failed to extract to {}", extracted_dir.display()))?;
     }
 
@@ -2127,6 +2123,7 @@ fn extract_package_cached(store: &Store, hash_str: &str, pkg_dir: &Path) -> Resu
 /// Recursively create hardlinks from `src` to `dst`, falling back to copy
 /// if hardlinking across filesystems fails.
 fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
     for entry in walkdir::WalkDir::new(src) {
         let entry = entry?;
         let relative = entry
@@ -2144,23 +2141,14 @@ fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
             #[cfg(unix)]
             {
                 let link_target = std::fs::read_link(entry.path())?;
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
                 let _ = std::fs::remove_file(&target);
                 std::os::unix::fs::symlink(&link_target, &target)?;
             }
             #[cfg(not(unix))]
             {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
                 let _ = std::fs::copy(entry.path(), &target);
             }
         } else {
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
             if std::fs::hard_link(entry.path(), &target).is_err() {
                 let _ = std::fs::copy(entry.path(), &target);
             }
