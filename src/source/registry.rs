@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::source::SourceError;
 use crate::types::{Constraint, PackageIdentity, Version};
-use crate::util::http::HttpClient;
+use crate::util::http::{HttpClient, HttpError};
 
 const CACHE_TTL: Duration = Duration::from_secs(604800); // 7 days
 
@@ -40,14 +40,13 @@ impl RegistrySource {
         }
 
         let url = format!("{}/{name}", self.registry_url);
-        let body = self
-            .client
-            .get(&url)
-            .await
-            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let body = self.client.get(&url).await.map_err(|e| match &e {
+            HttpError::StatusNotOk(reqwest::StatusCode::NOT_FOUND) => SourceError::PackageNotFound,
+            _ => SourceError::NetworkError(e.to_string()),
+        })?;
 
         let parsed: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| SourceError::PackageNotFound)?;
+            serde_json::from_slice(&body).map_err(|e| SourceError::ParseError(e.to_string()))?;
 
         if use_cache {
             Self::write_cached_metadata(name, &parsed);
@@ -192,11 +191,10 @@ impl RegistrySource {
             self.registry_url,
             name = identity.name
         );
-        let body = self
-            .client
-            .get(&tarball_url)
-            .await
-            .map_err(|e| SourceError::NetworkError(e.to_string()))?;
+        let body = self.client.get(&tarball_url).await.map_err(|e| match &e {
+            HttpError::StatusNotOk(reqwest::StatusCode::NOT_FOUND) => SourceError::VersionNotFound,
+            _ => SourceError::NetworkError(e.to_string()),
+        })?;
         Ok(body)
     }
 
@@ -342,7 +340,7 @@ mod tests {
 
         let src = RegistrySource::new(url.to_string()).unwrap();
         let err = src.resolve("missing").await.unwrap_err();
-        assert!(matches!(err, SourceError::NetworkError(_)));
+        assert!(matches!(err, SourceError::PackageNotFound));
         mock.assert_async().await;
     }
 
@@ -359,7 +357,7 @@ mod tests {
 
         let src = RegistrySource::new(url.to_string()).unwrap();
         let err = src.resolve("bad").await.unwrap_err();
-        assert!(matches!(err, SourceError::PackageNotFound));
+        assert!(matches!(err, SourceError::ParseError(_)));
     }
 
     #[tokio::test]
