@@ -102,8 +102,15 @@ pub enum Commands {
     Build,
     /// Publish the project (not yet implemented)
     Publish,
-    /// Run garbage collection on the store (not yet implemented)
-    Gc,
+    /// Run garbage collection on the store
+    Gc {
+        /// Show what would be removed without deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove all objects not referenced by any lockfile (full sweep)
+        #[arg(long)]
+        aggressive: bool,
+    },
     /// Trust a package (not yet implemented)
     Trust { package: String },
 }
@@ -175,7 +182,18 @@ impl Cli {
                 eprintln!("ara publish: not yet implemented");
                 Ok(())
             }
-            Commands::Gc => gc::cmd_gc(),
+            Commands::Gc {
+                dry_run,
+                aggressive,
+            } => {
+                if *aggressive {
+                    gc::cmd_gc_aggressive()
+                } else if *dry_run {
+                    gc::cmd_gc_dry_run()
+                } else {
+                    gc::cmd_gc()
+                }
+            }
             Commands::Trust { package: _ } => {
                 eprintln!("ara trust: not yet implemented");
                 Ok(())

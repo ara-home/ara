@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -14,6 +14,7 @@ use crate::manifest::parser;
 use crate::resolver::mvs::{ConstraintEntry, Resolver};
 use crate::source::Source;
 use crate::store::cas::Store;
+use crate::store::index::StoreIndex;
 use crate::types::{Constraint, PackageIdentity, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
@@ -501,7 +502,7 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
 async fn install_transitive_deps(
     node_modules: &Path,
     store: &Store,
-    store_index: &Arc<Mutex<HashMap<String, String>>>,
+    store_index: &Arc<StoreIndex>,
     pkg_entries: &mut Vec<PackageEntry>,
     initial_packages: &[String],
 ) -> Result<()> {
@@ -737,19 +738,13 @@ async fn install_transitive_deps(
         let nm = nm.to_path_buf();
 
         tasks.push(tokio::spawn(async move {
-            let cache_lookup = {
-                let guard = idx.lock().unwrap_or_else(|e| e.into_inner());
-                guard.get(&cache_key).cloned()
-            };
+            let cache_lookup = idx.lookup(&cache_key).ok().flatten();
             let result = if let Some(cached_hash) = cache_lookup {
                 if store_ref.contains(&cached_hash) {
                     ch.fetch_add(1, Ordering::Relaxed);
                     cached_hash
                 } else {
-                    {
-                        let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.remove(&cache_key);
-                    }
+                    let _ = idx.remove(&cache_key);
                     match reg_ref.fetch(&identity).await {
                         Ok(content) => match tokio::task::spawn_blocking({
                             let s = store_ref.clone();
@@ -761,8 +756,7 @@ async fn install_transitive_deps(
                         .and_then(|r| r.ok())
                         {
                             Some(h) => {
-                                let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
-                                guard.insert(cache_key.clone(), h.clone());
+                                let _ = idx.insert(&cache_key, &h, "npm", 0);
                                 h
                             }
                             None => {
@@ -788,8 +782,7 @@ async fn install_transitive_deps(
                     .and_then(|r| r.ok())
                     {
                         Some(h) => {
-                            let mut guard = idx.lock().unwrap_or_else(|e| e.into_inner());
-                            guard.insert(cache_key.clone(), h.clone());
+                            let _ = idx.insert(&cache_key, &h, "npm", 0);
                             h
                         }
                         None => {
@@ -945,14 +938,8 @@ pub(crate) async fn cmd_install_specs(
         }
     }
 
-    let index_path = store_base.join("index.json");
-    let store_index: HashMap<String, String> = if index_path.exists() {
-        let idx_content = std::fs::read_to_string(&index_path)?;
-        serde_json::from_str(&idx_content).unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
-    let store_index = Arc::new(Mutex::new(store_index));
+    let index_path = store_base.join("index.db");
+    let store_index = Arc::new(StoreIndex::new(index_path)?);
 
     // Seed pkg_entries from existing lockfile so we don't lose prior entries
     let lock_path = cwd.join("ara.lock");
@@ -996,17 +983,16 @@ pub(crate) async fn cmd_install_specs(
         let (pkg_content, hash_str) = if force {
             let content = fetch_meta_content(&meta).await?;
             let hash = store.put(&content)?;
-            {
-                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                idx.insert(cache_key.clone(), hash.clone());
-            }
+            let _ = store_index.insert(
+                &cache_key,
+                &hash,
+                &meta.source_type.to_string(),
+                content.len() as i64,
+            );
             println!("  fetching {}@{} (forced)...", meta.name, ver_str);
             (content, hash)
         } else {
-            let cached = {
-                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                idx.get(&cache_key).cloned()
-            };
+            let cached = store_index.lookup(&cache_key).ok().flatten();
             if let Some(cached_hash) = cached {
                 if store.contains(&cached_hash) {
                     if let Some(content) = store.get(&cached_hash)? {
@@ -1014,26 +1000,27 @@ pub(crate) async fn cmd_install_specs(
                             println!("  refresh: re-fetching {}@{}", meta.name, ver_str);
                             let content = fetch_meta_content(&meta).await?;
                             let hash = store.put(&content)?;
-                            {
-                                let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                                idx.insert(cache_key.clone(), hash.clone());
-                            }
+                            let _ = store_index.insert(
+                                &cache_key,
+                                &hash,
+                                &meta.source_type.to_string(),
+                                content.len() as i64,
+                            );
                             (content, hash)
                         } else {
                             println!("  using cached {}@{}", meta.name, ver_str);
                             (content, cached_hash)
                         }
                     } else {
-                        {
-                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                            idx.remove(&cache_key);
-                        }
+                        let _ = store_index.remove(&cache_key);
                         let content = fetch_meta_content(&meta).await?;
                         let hash = store.put(&content)?;
-                        {
-                            let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                            idx.insert(cache_key.clone(), hash.clone());
-                        }
+                        let _ = store_index.insert(
+                            &cache_key,
+                            &hash,
+                            &meta.source_type.to_string(),
+                            content.len() as i64,
+                        );
                         (content, hash)
                     }
                 } else if offline {
@@ -1043,16 +1030,15 @@ pub(crate) async fn cmd_install_specs(
                         ver_str
                     );
                 } else {
-                    {
-                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.remove(&cache_key);
-                    }
+                    let _ = store_index.remove(&cache_key);
                     let content = fetch_meta_content(&meta).await?;
                     let hash = store.put(&content)?;
-                    {
-                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.insert(cache_key.clone(), hash.clone());
-                    }
+                    let _ = store_index.insert(
+                        &cache_key,
+                        &hash,
+                        &meta.source_type.to_string(),
+                        content.len() as i64,
+                    );
                     (content, hash)
                 }
             } else if offline {
@@ -1064,10 +1050,12 @@ pub(crate) async fn cmd_install_specs(
             } else {
                 let content = fetch_meta_content(&meta).await?;
                 let hash = store.put(&content)?;
-                {
-                    let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                    idx.insert(cache_key.clone(), hash.clone());
-                }
+                let _ = store_index.insert(
+                    &cache_key,
+                    &hash,
+                    &meta.source_type.to_string(),
+                    content.len() as i64,
+                );
                 println!("  fetching {}@{}...", meta.name, ver_str);
                 (content, hash)
             }
@@ -1190,14 +1178,6 @@ pub(crate) async fn cmd_install_specs(
         installed_names.push(meta.name.clone());
 
         println!();
-    }
-
-    // Save store index
-    {
-        let idx = store_index
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
-        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
     }
 
     // Write updated package.json
@@ -1598,21 +1578,8 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     let store = Store::new(store_base.clone());
     store.ensure_dirs()?;
 
-    let index_path = store_base.join("index.json");
-    let store_index: HashMap<String, String> = if index_path.exists() {
-        let idx_content = std::fs::read_to_string(&index_path)?;
-        serde_json::from_str(&idx_content).unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
-
-    if let Err(e) = std::fs::create_dir_all(&node_modules) {
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(e).context("failed to create node_modules directory");
-        }
-    }
-
-    let store_index = Arc::new(Mutex::new(store_index));
+    let index_path = store_base.join("index.db");
+    let store_index = Arc::new(StoreIndex::new(index_path)?);
     let mut pkg_entries: Vec<PackageEntry> = Vec::new();
 
     // Process packages in parallel
@@ -1652,20 +1619,14 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
             let cache_key = format!("{}@{}", node.name, ver_str);
 
-            let cached = {
-                let idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                idx.get(&cache_key).cloned()
-            };
+            let cached = store_index.lookup(&cache_key).ok().flatten();
 
             let hash_str = if let Some(cached_hash) = cached {
                 if store.contains(&cached_hash) {
                     println!("  using cached {}@{}", node.name, ver_str);
                     cached_hash
                 } else {
-                    {
-                        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-                        idx.remove(&cache_key);
-                    }
+                    let _ = store_index.remove(&cache_key);
                     fetch_and_store_parallel(
                         &store,
                         &store_index,
@@ -1840,14 +1801,6 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         t_phase1.elapsed()
     );
 
-    // Save store index
-    {
-        let idx = store_index
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
-        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
-    }
-
     // Install transitive dependencies discovered from extracted packages
     let installed_names: Vec<String> = processed.iter().map(|p| p.name.clone()).collect();
     install_transitive_deps(
@@ -1858,14 +1811,6 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         &installed_names,
     )
     .await?;
-
-    // Save store index again to persist entries added by install_transitive_deps
-    {
-        let idx = store_index
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
-        std::fs::write(&index_path, serde_json::to_string_pretty(&*idx)?)?;
-    }
 
     let graph_bytes = serde_json::to_vec(&graph.nodes)?;
     let store_graph_hash = store.put_graph(&graph_bytes)?;
@@ -1899,7 +1844,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
 
 async fn fetch_and_store_parallel(
     store: &Store,
-    store_index: &Arc<Mutex<HashMap<String, String>>>,
+    store_index: &Arc<StoreIndex>,
     src: &Source,
     cache_key: &str,
     node: &crate::resolver::graph::Node,
@@ -1931,10 +1876,12 @@ async fn fetch_and_store_parallel(
         }
     };
 
-    {
-        let mut idx = store_index.lock().unwrap_or_else(|e| e.into_inner());
-        idx.insert(cache_key.to_string(), hash_str.clone());
-    }
+    let _ = store_index.insert(
+        cache_key,
+        &hash_str,
+        &node.source.to_string(),
+        pkg_content.len() as i64,
+    );
 
     Some(hash_str)
 }

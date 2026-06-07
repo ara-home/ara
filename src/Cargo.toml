@@ -30,6 +30,8 @@ chrono = { version = "0.4", features = ["clock"] }
 semver = { version = "1", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [features]
 nightly-bench = []
