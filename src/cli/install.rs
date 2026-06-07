@@ -1474,7 +1474,14 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
     if let Some(ws) = &m.workspace {
         let workspace_deps = expand_workspace_members(ws, cwd);
         for dep in workspace_deps {
-            if !m.deps.iter().any(|d| d.name == dep.name) {
+            if let Some(existing) = m.deps.iter_mut().find(|d| d.name == dep.name) {
+                if existing.path.is_none() {
+                    existing.path = dep.path.clone();
+                }
+                if dep.version.is_some() {
+                    existing.version = dep.version.clone();
+                }
+            } else {
                 println!(
                     "  workspace member: {} -> {}",
                     dep.name,
@@ -1601,6 +1608,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
         let store_index = Arc::clone(&store_index);
         let node_modules = node_modules.to_path_buf();
 
+        let cwd = cwd.to_path_buf();
         tasks.push(tokio::spawn(async move {
             let ver_str = format!(
                 "{}.{}.{}",
@@ -1611,6 +1619,42 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool) -> Result<()> {
                 Some(d) => d,
                 None => return None,
             };
+
+            // Workspace deps are live symlinks, not fetched/extracted
+            if node.source == SourceType::Workspace {
+                let rel_path = dep.path.as_deref().unwrap_or(".");
+                let member_path = cwd.join(rel_path);
+                let pkg_dir = node_modules.join(&node.name);
+                let _ = std::fs::remove_dir_all(&pkg_dir);
+                std::fs::create_dir_all(pkg_dir.parent().unwrap_or(&node_modules)).ok()?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&member_path, &pkg_dir).ok()?;
+                #[cfg(not(unix))]
+                std::fs::hard_link(&member_path, &pkg_dir).ok()?;
+                println!("  symlink {} -> {}", node.name, member_path.display());
+
+                let pkg_dir_clone = pkg_dir.clone();
+                let analysis = match tokio::task::spawn_blocking(move || {
+                    analyzer::analyze_package(&pkg_dir_clone)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("  failed to analyze {} (task panic): {}", node.name, e);
+                        return None;
+                    }
+                };
+
+                return Some(ProcessedNode {
+                    name: node.name.clone(),
+                    version: ver_str,
+                    hash_str: format!("workspace:{}", rel_path),
+                    pkg_dir,
+                    source_type: "workspace".to_string(),
+                    analysis,
+                });
+            }
 
             let src = match create_source(node.source, dep) {
                 Ok(s) => s,
