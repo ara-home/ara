@@ -45,63 +45,53 @@ pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError>
 
     let mut deps = Vec::new();
 
-    if let Some(deps_map) = raw.dependencies {
-        for (name, ver) in deps_map {
-            deps.push(DependencyEntry {
+    fn dep_from_version(name: String, ver: String, kind: Option<&str>) -> DependencyEntry {
+        if let Some(stripped) = ver.strip_prefix("workspace:") {
+            DependencyEntry {
+                name,
+                source: "workspace".to_string(),
+                kind: kind.map(|s| s.to_string()),
+                version: Some(stripped.to_string()),
+                repo: None,
+                url: None,
+                commit: None,
+                path: None,
+            }
+        } else {
+            DependencyEntry {
                 name,
                 source: "npm".to_string(),
-                kind: Some("prod".to_string()),
+                kind: kind.map(|s| s.to_string()),
                 version: Some(ver),
                 repo: None,
                 url: None,
                 commit: None,
                 path: None,
-            });
+            }
+        }
+    }
+
+    if let Some(deps_map) = raw.dependencies {
+        for (name, ver) in deps_map {
+            deps.push(dep_from_version(name, ver, Some("prod")));
         }
     }
 
     if let Some(deps_map) = raw.devDependencies {
         for (name, ver) in deps_map {
-            deps.push(DependencyEntry {
-                name,
-                source: "npm".to_string(),
-                kind: Some("dev".to_string()),
-                version: Some(ver),
-                repo: None,
-                url: None,
-                commit: None,
-                path: None,
-            });
+            deps.push(dep_from_version(name, ver, Some("dev")));
         }
     }
 
     if let Some(deps_map) = raw.peerDependencies {
         for (name, ver) in deps_map {
-            deps.push(DependencyEntry {
-                name,
-                source: "npm".to_string(),
-                kind: Some("peer".to_string()),
-                version: Some(ver),
-                repo: None,
-                url: None,
-                commit: None,
-                path: None,
-            });
+            deps.push(dep_from_version(name, ver, Some("peer")));
         }
     }
 
     if let Some(deps_map) = raw.optionalDependencies {
         for (name, ver) in deps_map {
-            deps.push(DependencyEntry {
-                name,
-                source: "npm".to_string(),
-                kind: Some("optional".to_string()),
-                version: Some(ver),
-                repo: None,
-                url: None,
-                commit: None,
-                path: None,
-            });
+            deps.push(dep_from_version(name, ver, Some("optional")));
         }
     }
 
@@ -169,7 +159,14 @@ pub fn generate_package_json(manifest: &Manifest) -> String {
     let mut optional_deps = BTreeMap::new();
 
     for dep in &manifest.deps {
-        let ver = dep.version.clone().unwrap_or_else(|| "*".to_string());
+        let ver = if dep.source == "workspace" {
+            format!(
+                "workspace:{}",
+                dep.version.clone().unwrap_or_else(|| "*".to_string())
+            )
+        } else {
+            dep.version.clone().unwrap_or_else(|| "*".to_string())
+        };
         match dep.kind.as_deref() {
             Some("dev") => {
                 dev_deps.insert(dep.name.clone(), ver);
@@ -383,6 +380,52 @@ mod tests {
         let ws = m.workspace.unwrap();
         assert_eq!(ws.members.len(), 2);
         assert_eq!(ws.members[0], "apps/*");
+    }
+
+    #[test]
+    fn test_parse_workspace_prefix_dep() {
+        let json = r#"{
+            "name": "monorepo",
+            "version": "0.1.0",
+            "dependencies": {
+                "pkg-a": "workspace:^",
+                "pkg-b": "workspace:*",
+                "pkg-c": "workspace:1.2.3"
+            }
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        assert_eq!(m.deps.len(), 3);
+
+        let a = m.deps.iter().find(|d| d.name == "pkg-a").unwrap();
+        assert_eq!(a.source, "workspace");
+        assert_eq!(a.version.as_deref(), Some("^"));
+
+        let b = m.deps.iter().find(|d| d.name == "pkg-b").unwrap();
+        assert_eq!(b.source, "workspace");
+        assert_eq!(b.version.as_deref(), Some("*"));
+
+        let c = m.deps.iter().find(|d| d.name == "pkg-c").unwrap();
+        assert_eq!(c.source, "workspace");
+        assert_eq!(c.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn test_parse_regular_dep_unaffected_by_workspace_prefix() {
+        let json = r#"{
+            "name": "app",
+            "version": "1.0.0",
+            "dependencies": {
+                "zod": "^3.0.0",
+                "react": "workspace:^"
+            }
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        let zod = m.deps.iter().find(|d| d.name == "zod").unwrap();
+        assert_eq!(zod.source, "npm");
+        assert_eq!(zod.version.as_deref(), Some("^3.0.0"));
+        let react = m.deps.iter().find(|d| d.name == "react").unwrap();
+        assert_eq!(react.source, "workspace");
+        assert_eq!(react.version.as_deref(), Some("^"));
     }
 
     #[test]
@@ -608,5 +651,50 @@ mod tests {
         let ws = parsed["workspaces"].as_array().unwrap();
         assert_eq!(ws.len(), 2);
         assert_eq!(ws[0].as_str(), Some("apps/*"));
+    }
+
+    #[test]
+    fn test_generate_with_workspace_deps() {
+        let m = Manifest {
+            project: Project {
+                name: "monorepo".into(),
+                version: "0.1.0".into(),
+            },
+            deps: vec![
+                DependencyEntry {
+                    name: "pkg-a".into(),
+                    source: "workspace".into(),
+                    kind: Some("prod".into()),
+                    version: Some("^".into()),
+                    repo: None,
+                    url: None,
+                    commit: None,
+                    path: None,
+                },
+                DependencyEntry {
+                    name: "zod".into(),
+                    source: "npm".into(),
+                    kind: Some("prod".into()),
+                    version: Some("^3.0.0".into()),
+                    repo: None,
+                    url: None,
+                    commit: None,
+                    path: None,
+                },
+            ],
+            workspace: None,
+            scripts: vec![],
+            security: None,
+            build: None,
+            package_json_extras: None,
+        };
+        let out = generate_package_json(&m);
+        assert!(out.contains(r#""workspace:^""#));
+        assert!(out.contains(r#""^3.0.0""#));
+
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let deps = parsed["dependencies"].as_object().unwrap();
+        assert_eq!(deps["pkg-a"].as_str(), Some("workspace:^"));
+        assert_eq!(deps["zod"].as_str(), Some("^3.0.0"));
     }
 }

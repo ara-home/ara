@@ -163,6 +163,9 @@ fn find_npm_deps(fixture_dir: &Path) -> Vec<(String, String)> {
                     if let Some(deps_map) = val.get(field).and_then(|v| v.as_object()) {
                         for (k, v) in deps_map {
                             let ver = v.as_str().unwrap_or("*");
+                            if ver.starts_with("workspace:") {
+                                continue;
+                            }
                             deps.push((k.clone(), ver.to_string()));
                         }
                     }
