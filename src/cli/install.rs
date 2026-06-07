@@ -22,17 +22,22 @@ use super::prompt::{prompt_allow_package, AllowDecision};
 fn write_lockfile(cwd: &Path, store: Option<&Store>, pkg_entries: &[PackageEntry]) -> Result<()> {
     let ts = current_timestamp();
 
-    let graph_hash = store.and_then(|_| {
+    let graph_hash = if let Some(store) = store {
         if pkg_entries.is_empty() {
             None
         } else {
-            let graph_bytes = serde_json::to_vec(pkg_entries).ok()?;
+            let graph_bytes = serde_json::to_vec(pkg_entries)
+                .context("failed to serialize package entries for graph hash")?;
             let raw = crate::util::hash::compute(&graph_bytes);
             let hex = crate::util::hash::hex_encode(&raw);
-            let store_hash = store?.put_graph(&graph_bytes).ok()?;
+            let store_hash = store
+                .put_graph(&graph_bytes)
+                .context("failed to store graph hash in content store")?;
             Some(format!("sha256:{hex} (store: {store_hash})"))
         }
-    });
+    } else {
+        None
+    };
 
     let lockfile = Lockfile {
         version: 1,

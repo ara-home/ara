@@ -65,7 +65,7 @@ pub(crate) fn cmd_gc_in(
         total_removed += temp_removed;
     }
 
-    let (graph_removed, graph_freed) = clean_graphs(store_base, dry_run);
+    let (graph_removed, graph_freed) = clean_graphs(store_base, dry_run, aggressive);
     if graph_removed > 0 {
         let action = if dry_run { "Would remove" } else { "Removed" };
         println!("  {action} {graph_removed} graph snapshots ({graph_freed} bytes)");
@@ -241,7 +241,10 @@ fn clean_extracted(
     Ok((removed, freed))
 }
 
-fn clean_graphs(store_base: &std::path::Path, dry_run: bool) -> (u64, u64) {
+fn clean_graphs(store_base: &std::path::Path, dry_run: bool, aggressive: bool) -> (u64, u64) {
+    if !aggressive {
+        return (0, 0);
+    }
     let graphs_dir = store_base.join("graphs");
     if !graphs_dir.exists() {
         return (0, 0);
