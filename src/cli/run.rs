@@ -98,3 +98,62 @@ fn resolve_script(cwd: &Path, name: &str) -> Result<String> {
         "script '{name}' not found in ara.toml or package.json"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_cmd_run_invalid_profile() {
+        let res = cmd_run("start", "invalid-profile-name");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("invalid profile"));
+    }
+
+    #[test]
+    fn test_resolve_script_not_found() {
+        let dir = TempDir::new().unwrap();
+        let res = resolve_script(dir.path(), "non_existent_script");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("no ara.toml or package.json found"));
+    }
+
+    #[test]
+    fn test_resolve_script_from_package_json() {
+        let dir = TempDir::new().unwrap();
+        let pkg_json_path = dir.path().join("package.json");
+        let mut f = File::create(pkg_json_path).unwrap();
+        writeln!(f, r#"{{"scripts": {{"start": "node index.js"}}}}"#).unwrap();
+
+        let res = resolve_script(dir.path(), "start").unwrap();
+        assert_eq!(res, "node index.js");
+    }
+
+    #[test]
+    fn test_resolve_script_from_ara_toml() {
+        let dir = TempDir::new().unwrap();
+        let manifest_path = dir.path().join("ara.toml");
+        let mut f = File::create(manifest_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[project]
+name = "test"
+version = "1.0.0"
+
+[scripts]
+test = "echo test"
+"#
+        )
+        .unwrap();
+
+        let res = resolve_script(dir.path(), "test").unwrap();
+        assert_eq!(res, "echo test");
+    }
+}

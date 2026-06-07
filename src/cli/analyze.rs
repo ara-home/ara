@@ -36,3 +36,22 @@ pub(crate) fn cmd_analyze(path: &str) -> Result<()> {
 pub(crate) fn cmd_audit(path: &str) -> Result<()> {
     run_analysis(path, "Auditing", true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cmd_analyze_invalid_path() {
+        let res = cmd_analyze("/path/that/definitely/does/not/exist/12345");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("invalid path"));
+    }
+
+    #[test]
+    fn test_cmd_audit_invalid_path() {
+        let res = cmd_audit("/path/that/definitely/does/not/exist/12345");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("invalid path"));
+    }
+}
