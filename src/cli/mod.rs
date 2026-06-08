@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod analyze;
 mod gc;
-pub(crate) mod install;
+pub mod install;
 mod prompt;
 mod run;
 mod x;

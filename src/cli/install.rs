@@ -212,7 +212,7 @@ fn expand_workspace_members(
     entries
 }
 
-fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
+pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     // Pass 1: detect prefix without allocating file data
     let prefix = {
         let decoder = flate2::read::GzDecoder::new(tarball);

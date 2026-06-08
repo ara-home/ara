@@ -37,6 +37,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 nightly-bench = []
 
 [dev-dependencies]
+criterion = { package = "codspeed-criterion-compat", version = "3" }
 mockito = "1"
 
 [lib]
@@ -45,3 +46,15 @@ path = "lib.rs"
 [[bin]]
 name = "ara"
 path = "main.rs"
+
+[[bench]]
+name = "install_bench"
+harness = false
+
+[[bench]]
+name = "resolver_bench"
+harness = false
+
+[[bench]]
+name = "security_bench"
+harness = false
