@@ -212,7 +212,7 @@ fn expand_workspace_members(
     entries
 }
 
-fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
+pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     // Pass 1: detect prefix without allocating file data
     let prefix = {
         let decoder = flate2::read::GzDecoder::new(tarball);
@@ -277,7 +277,7 @@ fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
 }
 
 /// Create symlinks in `node_modules/.bin/` for the package's `bin` entries.
-fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Result<()> {
+pub fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) -> Result<()> {
     let pkg_json_path = pkg_dir.join("package.json");
     if !pkg_json_path.exists() {
         return Ok(());
@@ -2104,7 +2104,7 @@ fn extract_package_cached(
 
 /// Recursively create hardlinks from `src` to `dst`, falling back to copy
 /// if hardlinking across filesystems fails.
-fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
+pub fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in walkdir::WalkDir::new(src) {
         let entry = entry?;

@@ -33,6 +33,24 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
+/// Build a gzipped tarball with custom files (path -> content).
+fn make_tarball_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+    let mut ar = tar::Builder::new(encoder);
+    for (path, content) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, *content).unwrap();
+    }
+    let encoder = ar.into_inner().unwrap();
+    encoder.finish().unwrap();
+    buf
+}
+
 /// Build a minimal gzipped tarball with a single file.
 fn make_minimal_tarball() -> Vec<u8> {
     let mut buf = Vec::new();
@@ -92,6 +110,70 @@ fn mock_npm_package(server: &mut mockito::Server, name: &str, version: &str) -> 
         .create();
 
     // Tarball endpoint:  GET /{name}/-/{bare_name}-{version}.tgz
+    let tarball = make_minimal_tarball();
+    let m2 = server
+        .mock(
+            "GET",
+            format!("/{name}/-/{bare_name}-{clean_ver}.tgz").as_str(),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(tarball)
+        .create();
+
+    vec![m1, m2]
+}
+
+/// Like `mock_npm_package`, but includes `dependencies` in the version metadata.
+/// `deps` is a list of `(dep_name, dep_version)` pairs.
+fn mock_npm_package_with_deps(
+    server: &mut mockito::Server,
+    name: &str,
+    version: &str,
+    deps: &[(&str, &str)],
+) -> Vec<mockito::Mock> {
+    let clean_ver = version
+        .trim_start_matches('^')
+        .trim_start_matches('~')
+        .trim_start_matches('>')
+        .trim_start_matches('<')
+        .trim_start_matches('=')
+        .trim_start_matches('*');
+    let clean_ver = if clean_ver.is_empty() {
+        "0.0.0"
+    } else {
+        clean_ver
+    };
+
+    let bare_name = name.rsplit('/').next().unwrap_or(name);
+
+    let deps_map: serde_json::Map<String, serde_json::Value> = deps
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let mut version_obj = serde_json::json!({
+        "name": name,
+        "version": clean_ver,
+        "dist": {
+            "tarball": format!("{}/{}/-/{}-{}.tgz", server.url(), name, bare_name, clean_ver)
+        }
+    });
+    if !deps_map.is_empty() {
+        version_obj["dependencies"] = serde_json::Value::Object(deps_map);
+    }
+    let versions_body = serde_json::json!({
+        "name": name,
+        "dist-tags": { "latest": clean_ver },
+        "versions": { clean_ver: version_obj }
+    });
+
+    let m1 = server
+        .mock("GET", format!("/{name}").as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(versions_body.to_string())
+        .create();
+
     let tarball = make_minimal_tarball();
     let m2 = server
         .mock(
@@ -455,6 +537,199 @@ fn test_install_url_into_existing_manifest() {
         &["install", "--non-interactive", "express"],
     );
     assert!(result.passed, "{}", result.detail);
+}
+
+// ---------------------------------------------------------------------------
+// Custom E2E fixture tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_install_transitive_deps() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixture_dir = r.join("valid/13-transitive-deps");
+
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    // dep-a@1.0.0 depends on dep-b@1.0.0
+    let _a = mock_npm_package_with_deps(&mut server, "dep-a", "1.0.0", &[("dep-b", "1.0.0")]);
+    // dep-b@1.0.0 depends on dep-c@1.0.0
+    let _b = mock_npm_package_with_deps(&mut server, "dep-b", "1.0.0", &[("dep-c", "1.0.0")]);
+    // dep-c@1.0.0 has no extra deps (but mock_npm_package doesn't add any)
+    let _c = mock_npm_package(&mut server, "dep-c", "1.0.0");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir(&fixture_dir, &project_dir);
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    assert!(
+        output.status.success(),
+        "install failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lockfile_path = project_dir.join("ara.lock");
+    assert!(lockfile_path.exists(), "ara.lock not created");
+
+    let lock_content = std::fs::read_to_string(&lockfile_path).unwrap();
+    let lf = ara::lockfile::parser::parse(&lock_content).unwrap();
+
+    let pkg_names: Vec<&str> = lf.packages.iter().map(|p| p.name.as_str()).collect();
+    assert!(pkg_names.contains(&"dep-a"), "dep-a missing from lockfile");
+    assert!(pkg_names.contains(&"dep-b"), "dep-b missing from lockfile");
+    assert!(pkg_names.contains(&"dep-c"), "dep-c missing from lockfile");
+}
+
+#[test]
+fn test_install_bin_links() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixture_dir = r.join("valid/14-bin-links");
+
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    // cli-tool@1.0.0 — tarball contains package.json with "bin" field + bin/cli.js
+    let bin_js: &[u8] = b"#!/usr/bin/env node\nconsole.log('hello');\n";
+    let pkg_json = serde_json::json!({
+        "name": "cli-tool",
+        "version": "1.0.0",
+        "bin": { "cli-tool": "./bin/cli.js" }
+    });
+    let tarball = make_tarball_with_files(&[
+        ("package.json", pkg_json.to_string().as_bytes()),
+        ("bin/cli.js", bin_js),
+    ]);
+
+    let versions_body = serde_json::json!({
+        "name": "cli-tool",
+        "dist-tags": { "latest": "1.0.0" },
+        "versions": {
+            "1.0.0": {
+                "name": "cli-tool",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": format!("{}/cli-tool/-/cli-tool-1.0.0.tgz", registry_url)
+                }
+            }
+        }
+    });
+    let _m1 = server
+        .mock("GET", "/cli-tool")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(versions_body.to_string())
+        .create();
+    let _m2 = server
+        .mock("GET", "/cli-tool/-/cli-tool-1.0.0.tgz")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(tarball)
+        .create();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir(&fixture_dir, &project_dir);
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    assert!(
+        output.status.success(),
+        "install failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bin_link = project_dir.join("node_modules/.bin/cli-tool");
+    assert!(bin_link.exists(), "bin link not found at {:?}", bin_link);
+
+    // Verify it's a symlink (or at least a regular file)
+    let meta = std::fs::metadata(&bin_link).expect("failed to read bin link metadata");
+    assert!(
+        meta.is_symlink() || meta.is_file(),
+        "expected bin link to be a symlink or file"
+    );
+}
+
+#[test]
+fn test_install_security_warning() {
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixture_dir = r.join("valid/15-security-warning");
+
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    // mal-pkg@1.0.0 — tarball contains code with eval() to trigger scanner
+    let tarball = make_tarball_with_files(&[("index.js", b"var x = 'user input';\neval(x);\n")]);
+
+    let versions_body = serde_json::json!({
+        "name": "mal-pkg",
+        "dist-tags": { "latest": "1.0.0" },
+        "versions": {
+            "1.0.0": {
+                "name": "mal-pkg",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": format!("{}/mal-pkg/-/mal-pkg-1.0.0.tgz", registry_url)
+                }
+            }
+        }
+    });
+    let _m1 = server
+        .mock("GET", "/mal-pkg")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(versions_body.to_string())
+        .create();
+    let _m2 = server
+        .mock("GET", "/mal-pkg/-/mal-pkg-1.0.0.tgz")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(tarball)
+        .create();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir(&fixture_dir, &project_dir);
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    // In --non-interactive mode, install succeeds but prints a warning
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "install should succeed in non-interactive mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let all_output = format!("{stdout}\n{stderr}");
+    assert!(
+        all_output.contains("finding") || all_output.contains("eval"),
+        "expected security warning in output:\n{}",
+        all_output
+    );
 }
 
 fn print_summary(results: &[FixtureResult]) {
