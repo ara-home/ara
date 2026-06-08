@@ -232,6 +232,30 @@ impl StoreIndex {
         Ok(hashes)
     }
 
+    /// Batch insert multiple cache entries in a single transaction.
+    /// Eliminates lock contention by replacing N individual insert() calls
+    /// with one bulk operation.
+    pub fn batch_insert(
+        &self,
+        entries: &[(String, String, String, i64)],
+    ) -> Result<(), IndexError> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        for (cache_key, hash, source, size) in entries {
+            tx.execute(
+                "INSERT INTO objects (cache_key, hash, source, refcount, size)
+                 VALUES (?1, ?2, ?3, 1, ?4)
+                 ON CONFLICT(cache_key) DO UPDATE SET
+                     hash = excluded.hash,
+                     refcount = refcount + 1,
+                     last_accessed = datetime('now')",
+                rusqlite::params![cache_key, hash, source, size],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn clean_orphan_entries(&self) -> Result<(u64, u64), IndexError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let removed_objects = conn.execute("DELETE FROM objects WHERE refcount <= 0", [])? as u64;

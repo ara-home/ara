@@ -3,6 +3,8 @@ use std::io::Write;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use tempfile::TempDir;
 
+use ara::store::index::StoreIndex;
+
 fn make_tarball(n: usize) -> Vec<u8> {
     let mut buf = Vec::new();
     let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
@@ -206,4 +208,78 @@ criterion_group!(
         bench_install_bin_links_50,
 );
 
-criterion_main!(install_phase1, install_phase3b);
+fn make_index() -> (TempDir, StoreIndex) {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let index = StoreIndex::new(dir.path().join("index.db")).unwrap();
+    (dir, index)
+}
+
+fn make_index_entries(n: usize) -> Vec<(String, String, String, i64)> {
+    let mut entries = Vec::with_capacity(n);
+    for i in 0..n {
+        entries.push((
+            format!("npm:pkg-{i:04}@1.0.0"),
+            format!("sha256-{:064x}", i),
+            "npm".to_string(),
+            1024 + i as i64 * 10,
+        ));
+    }
+    entries
+}
+
+fn bench_index_insert_individual_50(c: &mut Criterion) {
+    let entries = make_index_entries(50);
+    c.bench_function("index_insert_individual_50", |b| {
+        b.iter(|| {
+            let (_dir, index) = make_index();
+            for (ck, hash, source, size) in &entries {
+                index.insert(ck, hash, source, *size).unwrap();
+            }
+        });
+    });
+}
+
+fn bench_index_batch_insert_50(c: &mut Criterion) {
+    let entries = make_index_entries(50);
+    c.bench_function("index_batch_insert_50", |b| {
+        b.iter(|| {
+            let (_dir, index) = make_index();
+            index.batch_insert(black_box(&entries)).unwrap();
+        });
+    });
+}
+
+fn bench_index_batch_insert_200(c: &mut Criterion) {
+    let entries = make_index_entries(200);
+    c.bench_function("index_batch_insert_200", |b| {
+        b.iter(|| {
+            let (_dir, index) = make_index();
+            index.batch_insert(black_box(&entries)).unwrap();
+        });
+    });
+}
+
+fn bench_index_lookup_50(c: &mut Criterion) {
+    let (_dir, index) = make_index();
+    let entries = make_index_entries(50);
+    index.batch_insert(&entries).unwrap();
+    c.bench_function("index_lookup_50", |b| {
+        b.iter(|| {
+            for (ck, ..) in &entries {
+                let _ = index.lookup(ck);
+            }
+        });
+    });
+}
+
+criterion_group!(
+    name = install_store_index;
+    config = Criterion::default();
+    targets =
+        bench_index_insert_individual_50,
+        bench_index_batch_insert_50,
+        bench_index_batch_insert_200,
+        bench_index_lookup_50,
+);
+
+criterion_main!(install_phase1, install_phase3b, install_store_index);

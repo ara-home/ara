@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -489,6 +489,10 @@ async fn install_transitive_deps(
     let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
     let reg = crate::source::registry::RegistrySource::new(registry_url)?;
+    // Pre-warm the HTTP/2 connection so the thundering herd of
+    // concurrent downloads multiplexes over a single connection
+    // instead of each opening its own TCP + TLS handshake.
+    reg.warmup().await;
 
     // Pre-populate resolution from packages already known to be installed
     let mut resolution: HashMap<String, String> = HashMap::new();
@@ -708,6 +712,13 @@ async fn install_transitive_deps(
     let cache_hits = Arc::new(AtomicU32::new(0));
     let initial_pkgs: HashSet<String> = pkg_entries.iter().map(|e| e.name.clone()).collect();
     let mut total_tasks = 0usize;
+    // Collect fresh download entries for batch SQLite insert — avoids
+    // N concurrent tasks fighting over the StoreIndex mutex.
+    let index_pending: Arc<std::sync::Mutex<Vec<(String, String, String, i64)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Debug counters for cumulative time breakdown
+    let total_fetch_us: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let total_extract_us: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<(String, String, String)>>(1024);
     let idx_store = Arc::clone(store_index);
     let nm = node_modules;
@@ -731,6 +742,9 @@ async fn install_transitive_deps(
         let tx = tx.clone();
         let idx = Arc::clone(&idx_store);
         let ch = Arc::clone(&cache_hits_ref);
+        let idx_pending = Arc::clone(&index_pending);
+        let tf = Arc::clone(&total_fetch_us);
+        let te = Arc::clone(&total_extract_us);
         let reg_ref = reg.clone();
         let store_ref = store.clone();
         let nm = nm.to_path_buf();
@@ -805,6 +819,7 @@ async fn install_transitive_deps(
             }
 
             // Fresh download: fetch over network, then do ALL disk I/O in one spawn_blocking
+            let t_fetch = Instant::now();
             let content = match reg_ref.fetch(&identity).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -812,13 +827,14 @@ async fn install_transitive_deps(
                     return;
                 }
             };
+            tf.fetch_add(t_fetch.elapsed().as_micros() as u64, Ordering::Relaxed);
 
-            let ck = cache_key.clone();
+            let content_size = content.len() as i64;
             let dn = dep_name.clone();
             let s = store_ref.clone();
-            let i = idx.clone();
             let nm_c = nm.clone();
             let dd = dep_dir.clone();
+            let t_extract = Instant::now();
             let result = tokio::task::spawn_blocking(move || -> Option<String> {
                 // 1. Hash + store tarball
                 let hash = match s.put(&content) {
@@ -828,11 +844,7 @@ async fn install_transitive_deps(
                         return None;
                     }
                 };
-                // 2. Index insert
-                if let Err(e) = i.insert(&ck, &hash, "npm", content.len() as i64) {
-                    eprintln!("    warning: failed to cache index entry for {}: {}", dn, e);
-                }
-                // 3. Extract directly from content (no disk re-read!)
+                // 2. Extract directly from content (no disk re-read!)
                 let extracted_dir = s.get_extracted_path(&hash);
                 if !extracted_dir.exists() {
                     if let Err(e) = std::fs::create_dir_all(&extracted_dir) {
@@ -845,19 +857,26 @@ async fn install_transitive_deps(
                     }
                 }
                 drop(content); // free memory before hardlinking
-                               // 4. Hardlink to node_modules
+                               // 3. Hardlink to node_modules
                 let _ = std::fs::remove_dir_all(&dd);
                 if let Err(e) = hardlink_dir(&extracted_dir, &dd) {
                     eprintln!("    failed to hardlink {}: {}", dn, e);
                 }
-                // 5. Bin links
+                // 4. Bin links
                 let _ = install_bin_links(&nm_c, &dn, &dd);
                 Some(hash)
             })
             .await;
+            te.fetch_add(t_extract.elapsed().as_micros() as u64, Ordering::Relaxed);
 
             match result {
                 Ok(Some(hash)) => {
+                    idx_pending.lock().unwrap_or_else(|e| e.into_inner()).push((
+                        cache_key,
+                        hash.clone(),
+                        "npm".to_string(),
+                        content_size,
+                    ));
                     let _ = tx.send(Some((dep_name, short_ver, hash))).await;
                 }
                 Ok(None) => {
@@ -885,12 +904,27 @@ async fn install_transitive_deps(
         }
     }
     let fresh = total_tasks.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
+    let fetch_s = total_fetch_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+    let extract_s = total_extract_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
     eprintln!(
-        "  [profile] phase 3b download+extract: {:?} (hits: {}, fresh: {})",
+        "  [profile] phase 3b download+extract: {:?} (hits: {}, fresh: {}, fetch: {:.3}s, extract: {:.3}s)",
         t_dle.elapsed(),
         cache_hits.load(Ordering::Relaxed),
         fresh,
+        fetch_s,
+        extract_s,
     );
+
+    // Batch insert index entries — single transaction instead of N
+    // concurrent inserts contending for the SQLite mutex.
+    {
+        let pending = index_pending.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.is_empty() {
+            if let Err(e) = store_index.batch_insert(&pending) {
+                eprintln!("  warning: failed to batch cache index entries: {e}");
+            }
+        }
+    }
 
     for (dep_name, short_ver, hash_str) in &results {
         pkg_entries.push(PackageEntry {

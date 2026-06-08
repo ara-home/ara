@@ -37,6 +37,8 @@ fn shared_client() -> Result<reqwest::Client, HttpError> {
         .default_headers(headers)
         .pool_max_idle_per_host(512)
         .tcp_keepalive(Duration::from_secs(60))
+        .http2_initial_stream_window_size(Some(1_048_576)) // 1 MB per stream
+        .http2_initial_connection_window_size(Some(67_108_864)) // 64 MB total
         .build()?;
 
     let _ = CLIENT.set(client.clone());
