@@ -114,6 +114,7 @@ name = "ara"
 version = "0.9.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "codspeed-criterion-compat",
