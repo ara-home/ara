@@ -58,3 +58,15 @@ harness = false
 [[bench]]
 name = "security_bench"
 harness = false
+
+[[bench]]
+name = "util_bench"
+harness = false
+
+[[bench]]
+name = "manifest_bench"
+harness = false
+
+[[bench]]
+name = "lockfile_bench"
+harness = false
