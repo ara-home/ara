@@ -77,6 +77,50 @@ fn bench_scan_medium(c: &mut Criterion) {
     });
 }
 
+fn create_dir_with_dts(n_dts: usize, n_ts: usize, n_js: usize) -> TempDir {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    for i in 0..n_dts {
+        let name = format!("types/file_{i:06}.d.ts");
+        let full = dir.path().join(&name);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full, "declare const x: number;\nexport default x;\n").unwrap();
+    }
+    for i in 0..n_ts {
+        let name = format!("src/file_{i:06}.ts");
+        let full = dir.path().join(&name);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full, "const x: number = 1;\nconsole.log(x);\n").unwrap();
+    }
+    for i in 0..n_js {
+        let name = format!("src/file_{i:06}.js");
+        let full = dir.path().join(&name);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(&full).unwrap();
+        f.write_all(format!("const x = {i};\n").as_bytes()).unwrap();
+    }
+    dir
+}
+
+fn bench_analyze_with_dts(c: &mut Criterion) {
+    let dir = create_dir_with_dts(500, 200, 300);
+    c.bench_function("analyze_with_500dts_500ts_js", |b| {
+        b.iter(|| analyze_package(black_box(dir.path())).unwrap());
+    });
+}
+
+fn bench_scan_with_dts(c: &mut Criterion) {
+    let dir = create_dir_with_dts(500, 200, 300);
+    c.bench_function("scan_with_500dts_500ts_js", |b| {
+        b.iter(|| scan_package(black_box(dir.path())).unwrap());
+    });
+}
+
 fn bench_scan_large(c: &mut Criterion) {
     let dir = create_scan_dir(1000);
     c.bench_function("scan_large_1000files", |b| {
@@ -94,5 +138,7 @@ criterion_group!(
         bench_scan_small,
         bench_scan_medium,
         bench_scan_large,
+        bench_analyze_with_dts,
+        bench_scan_with_dts,
 );
 criterion_main!(security_scan);
