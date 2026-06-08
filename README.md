@@ -304,6 +304,7 @@ Flags:
 | `--force` | Re-download even if cached |
 | `--refresh` | Re-fetch for mutable references (branches, tags) |
 | `--offline` | Fail if package is not in cache |
+| `--package-lock` | Generate `package-lock.json` (temporary compat for deploy platforms) |
 
 ### `ara x <package> [args...]` (Execute packages)
 
@@ -480,7 +481,7 @@ The seccomp-BPF sandbox is Linux-specific and only supports x86_64 syscall numbe
 
 ### npm ecosystem compatibility gap
 
-Ara uses `package.json` as the primary source of truth for dependencies and scripts, so existing npm projects work out of the box with zero migration effort. However, there is no `package-lock.json`, `yarn.lock`, or `pnpm-lock.yaml` import — Ara resolves the tree from scratch and uses its own `ara.lock` format.
+Ara uses `package.json` as the primary source of truth for dependencies and scripts, so existing npm projects work out of the box with zero migration effort. Ara generates its own `ara.lock` for deterministic installs. For deploy platforms that don't yet detect `ara.lock`, pass `--package-lock` to also generate a `package-lock.json` (lockfileVersion 3). This flag is temporary — it will be removed once platforms add native `ara.lock` support.
 
 ### No private registry support
 
