@@ -44,6 +44,9 @@ pub enum Commands {
         offline: bool,
         #[arg(long)]
         non_interactive: bool,
+        /// Generate package-lock.json (temporary compat for deploy platforms)
+        #[arg(long)]
+        package_lock: bool,
     },
     /// Add project dependencies
     Add {
@@ -73,6 +76,9 @@ pub enum Commands {
         offline: bool,
         #[arg(long)]
         non_interactive: bool,
+        /// Generate package-lock.json (temporary compat for deploy platforms)
+        #[arg(long)]
+        package_lock: bool,
     },
     /// Execute a package binary (like npx or pnpm dlx)
     X {
@@ -128,6 +134,7 @@ impl Cli {
                 refresh,
                 offline,
                 non_interactive,
+                package_lock,
             } => {
                 if !deps.is_empty() {
                     install::cmd_install_specs(
@@ -140,10 +147,11 @@ impl Cli {
                         *refresh,
                         *offline,
                         *non_interactive,
+                        *package_lock,
                     )
                     .await
                 } else {
-                    install::cmd_install(*non_interactive).await
+                    install::cmd_install(*non_interactive, *package_lock).await
                 }
             }
             Commands::Add {
@@ -156,6 +164,7 @@ impl Cli {
                 refresh,
                 offline,
                 non_interactive,
+                package_lock,
             } => {
                 install::cmd_install_specs(
                     deps,
@@ -167,6 +176,7 @@ impl Cli {
                     *refresh,
                     *offline,
                     *non_interactive,
+                    *package_lock,
                 )
                 .await
             }
