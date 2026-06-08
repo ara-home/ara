@@ -36,8 +36,14 @@ fn is_package_json(path: &Path) -> bool {
         .is_some_and(|n| n == "package.json")
 }
 
+fn is_declaration_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".d.ts") || n.ends_with(".d.mts") || n.ends_with(".d.cts"))
+}
+
 fn is_relevant_file(path: &Path) -> bool {
-    is_source_file(path) || is_package_json(path)
+    (is_source_file(path) || is_package_json(path)) && !is_declaration_file(path)
 }
 
 fn is_ignored_dir(component: &str) -> bool {
@@ -264,6 +270,38 @@ mod tests {
 
         let files = scan_package(dir.path()).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_scanner_ignores_d_ts() {
+        let dir = create_temp_dir();
+        write_file(dir.path(), "index.js", "ok");
+        write_file(
+            dir.path(),
+            "types.d.ts",
+            "declare function exec(cmd: string): void;",
+        );
+        write_file(
+            dir.path(),
+            "module.d.mts",
+            "export function exec(cmd: string): void;",
+        );
+        write_file(
+            dir.path(),
+            "module.d.cts",
+            "export function exec(cmd: string): void;",
+        );
+
+        let files = scan_package(dir.path()).unwrap();
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"index.js"));
+        assert!(!paths.contains(&"types.d.ts"));
+        assert!(!paths.contains(&"module.d.mts"));
+        assert!(!paths.contains(&"module.d.cts"));
+        assert_eq!(paths.len(), 1);
     }
 
     #[test]

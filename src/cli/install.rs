@@ -15,7 +15,7 @@ use crate::resolver::mvs::{ConstraintEntry, Resolver};
 use crate::source::Source;
 use crate::store::cas::Store;
 use crate::store::index::StoreIndex;
-use crate::types::{Constraint, PackageIdentity, SourceType, Version};
+use crate::types::{Constraint, PackageIdentity, RiskLevel, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
@@ -1186,10 +1186,10 @@ pub(crate) async fn cmd_install_specs(
                             risk_level: Some(result.risk_level.to_string()),
                         }),
                     )
-                } else if non_interactive {
+                } else if non_interactive || result.risk_level <= RiskLevel::Medium {
                     let rl = result.risk_level;
                     print!(
-                        "  ✓ {}@{} ({}) ⚠  {} finding(s) ({})",
+                        "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — auto-approved",
                         meta.name,
                         ver_str,
                         hash_str,
