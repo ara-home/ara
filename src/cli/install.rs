@@ -1779,7 +1779,14 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
             let source_type = node.source;
             tasks.push(async move {
                 if let Ok(src) = create_source(source_type, dep) {
-                    if let Ok(version_str) = src.resolve(&node_name).await {
+                    let version_str = match &src {
+                        Source::Registry(reg) => {
+                            reg.resolve_matching(&node_name, dep.version.as_deref().unwrap_or("*"))
+                                .await
+                        }
+                        _ => src.resolve(&node_name).await,
+                    };
+                    if let Ok(version_str) = version_str {
                         if let Ok(parsed) = Version::parse(&version_str) {
                             return Some((i, parsed));
                         }
@@ -1822,11 +1829,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
             let all_match = existing.packages.iter().all(|p| {
                 graph.find_node(&p.name).is_some_and(|idx| {
                     let n = &graph.nodes[idx];
-                    let v = format!(
-                        "{}.{}.{}",
-                        n.version.major, n.version.minor, n.version.patch
-                    );
-                    n.source.to_string() == p.source && v == p.version
+                    n.source.to_string() == p.source && n.version.to_string() == p.version
                 })
             });
             if all_match && !graph.nodes.is_empty() {
@@ -1872,10 +1875,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
 
         let cwd = cwd.to_path_buf();
         tasks.push(tokio::spawn(async move {
-            let ver_str = format!(
-                "{}.{}.{}",
-                node.version.major, node.version.minor, node.version.patch
-            );
+            let ver_str = node.version.to_string();
 
             let dep = match find_dep(&m_deps, &node.name) {
                 Some(d) => d,
