@@ -420,9 +420,10 @@ mod tests {
             [security]
             require_review = true
         "#;
-        // TOML integers beyond i64 range cause parse error
+        // TOML integers beyond i64 range are ignored when deserializing
+        // into a struct without a matching field (toml 1.0+ behavior).
         let huge = format!("{src}\nhuge = 999999999999999999999999999");
         let result = parse(&huge);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 }
