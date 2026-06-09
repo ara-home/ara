@@ -77,7 +77,7 @@ pub struct WildcardParts {
 // Constraint
 // ---------------------------------------------------------------------------
 
-/// A version constraint (^, ~, >=, <=, >, <, exact, or wildcard).
+/// A version constraint (^, ~, >=, <=, >, <, exact, wildcard, or AND-combined).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {
     Exact(Version),
@@ -88,6 +88,8 @@ pub enum Constraint {
     LessOrEqual(Version),
     LessThan(Version),
     Wildcard(WildcardParts),
+    /// AND-combined constraints (space-separated in npm notation, e.g. `>=1.0.0 <2.0.0`).
+    And(Vec<Constraint>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +127,16 @@ impl Constraint {
     pub fn parse(s: &str) -> Result<Self, ConstraintParseError> {
         if s.is_empty() {
             return Err(ConstraintParseError::Empty);
+        }
+
+        // Compound constraint: space-separated AND (npm notation, e.g. ">=7.24.0 <7.24.7")
+        if s.contains(' ') {
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            if parts.len() > 1 {
+                let constraints: Result<Vec<Constraint>, _> =
+                    parts.iter().map(|p| Self::parse(p)).collect();
+                return Ok(Self::And(constraints?));
+            }
         }
 
         let bytes = s.as_bytes();
@@ -176,11 +188,22 @@ impl Constraint {
         })?))
     }
 
+    /// Per npm semver convention, a prerelease version should only satisfy a
+    /// constraint when the constraint's base version also carries a prerelease
+    /// identifier. If the constraint version is a release and the candidate is
+    /// a prerelease, they should not match.
+    fn prerelease_mismatch(constraint_ver: &Version, candidate: &Version) -> bool {
+        constraint_ver.pre.is_empty() && !candidate.pre.is_empty()
+    }
+
     #[must_use]
     pub fn satisfied_by(&self, version: &Version) -> bool {
         match self {
             Self::Exact(v) => version == v,
             Self::Caret(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
                 if version.major != v.major {
                     return false;
                 }
@@ -193,6 +216,9 @@ impl Constraint {
                 version >= v
             }
             Self::Tilde(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
                 if version.major != v.major {
                     return false;
                 }
@@ -201,10 +227,30 @@ impl Constraint {
                 }
                 version.patch >= v.patch
             }
-            Self::GreaterOrEqual(v) => version >= v,
-            Self::GreaterThan(v) => version > v,
-            Self::LessOrEqual(v) => version <= v,
-            Self::LessThan(v) => version < v,
+            Self::GreaterOrEqual(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
+                version >= v
+            }
+            Self::GreaterThan(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
+                version > v
+            }
+            Self::LessOrEqual(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
+                version <= v
+            }
+            Self::LessThan(v) => {
+                if Self::prerelease_mismatch(v, version) {
+                    return false;
+                }
+                version < v
+            }
             Self::Wildcard(w) => {
                 if w.major == u64::MAX {
                     return true;
@@ -219,6 +265,7 @@ impl Constraint {
                 }
                 true
             }
+            Self::And(constraints) => constraints.iter().all(|c| c.satisfied_by(version)),
         }
     }
 }
@@ -241,6 +288,15 @@ impl fmt::Display for Constraint {
                 } else {
                     write!(f, "{}.x", w.major)
                 }
+            }
+            Self::And(constraints) => {
+                for (i, c) in constraints.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{c}")?;
+                }
+                Ok(())
             }
         }
     }

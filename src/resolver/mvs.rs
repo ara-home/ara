@@ -93,6 +93,7 @@ fn select_version(constraints: &[ConstraintEntry], package: &str) -> Option<Vers
             | Constraint::Tilde(v) => v.clone(),
             Constraint::LessOrEqual(_) | Constraint::LessThan(_) => continue,
             Constraint::Wildcard(_) => Version::parse("0.0.0").ok()?,
+            Constraint::And(_) => continue,
         };
 
         // Verify candidate satisfies ALL constraints for this package
