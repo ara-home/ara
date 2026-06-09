@@ -1,4 +1,17 @@
 
+## [0.11.0] - 2026-06-09
+
+### 🚀 Features
+
+- Add changelog bot workflow (#35)
+
+### 💼 Other
+
+- Bump to v0.11.0
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog
 ## [0.10.1] - 2026-06-09
 
 ### 🐛 Bug Fixes
