@@ -38,7 +38,7 @@ base64 = "0.22"
 nightly-bench = []
 
 [dev-dependencies]
-criterion = { package = "codspeed-criterion-compat", version = "3" }
+criterion = { package = "codspeed-criterion-compat", version = "4" }
 mockito = "1"
 
 [lib]
