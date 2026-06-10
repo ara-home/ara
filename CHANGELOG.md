@@ -1,4 +1,13 @@
 
+## [unreleased]
+
+### 🐛 Bug Fixes
+
+- Handle shorthand versions and operator whitespace in constraint parsing (#38)
+
+### 📚 Documentation
+
+- Update CHANGELOG.md (#36)
 ## [0.11.0] - 2026-06-09
 
 ### 🚀 Features
