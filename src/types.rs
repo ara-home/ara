@@ -123,13 +123,64 @@ fn split_wildcard(s: &str) -> WildcardParts {
     WildcardParts { major, minor }
 }
 
+/// Remove whitespace between operator prefix (^, ~, >=, <=, >, <) and version number.
+/// npm allows spaces between operators and versions, e.g. `>= 2.1.2`.
+fn normalize_operators(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        if bytes[i] == b'^' || bytes[i] == b'~' {
+            out.push(bytes[i] as char);
+            i += 1;
+            while i < s.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        } else if i + 1 < s.len()
+            && ((bytes[i] == b'>' && bytes[i + 1] == b'=')
+                || (bytes[i] == b'<' && bytes[i + 1] == b'='))
+        {
+            out.push(bytes[i] as char);
+            out.push(bytes[i + 1] as char);
+            i += 2;
+            while i < s.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        } else if bytes[i] == b'>' || bytes[i] == b'<' {
+            out.push(bytes[i] as char);
+            i += 1;
+            while i < s.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 impl Constraint {
+    /// Parse a version string, expanding shorthand forms like "1" → "1.0.0", "1.2" → "1.2.0".
+    fn parse_version(s: &str) -> Result<Version, ConstraintParseError> {
+        let expanded = match s.chars().filter(|&c| c == '.').count() {
+            0 => format!("{s}.0.0"),
+            1 => format!("{s}.0"),
+            _ => s.to_string(),
+        };
+        semver::Version::parse(&expanded)
+            .map_err(|e| ConstraintParseError::InvalidVersion(e.to_string()))
+    }
+
     pub fn parse(s: &str) -> Result<Self, ConstraintParseError> {
         if s.is_empty() {
             return Err(ConstraintParseError::Empty);
         }
 
-        // Compound constraint: space-separated AND (npm notation, e.g. ">=7.24.0 <7.24.7")
+        // Normalize: remove whitespace between operator and version (npm allows ">= 2.1.2")
+        let s = normalize_operators(s);
+
+        // Compound constraint: space-separated AND (npm notation, e.g. ">=2.1.2 <3.0.0")
         if s.contains(' ') {
             let parts: Vec<&str> = s.split_whitespace().collect();
             if parts.len() > 1 {
@@ -141,35 +192,22 @@ impl Constraint {
 
         let bytes = s.as_bytes();
         if bytes[0] == b'^' {
-            return Ok(Self::Caret(semver::Version::parse(&s[1..]).map_err(
-                |e| ConstraintParseError::InvalidVersion(e.to_string()),
-            )?));
+            return Ok(Self::Caret(Self::parse_version(&s[1..])?));
         }
         if bytes[0] == b'~' {
-            return Ok(Self::Tilde(semver::Version::parse(&s[1..]).map_err(
-                |e| ConstraintParseError::InvalidVersion(e.to_string()),
-            )?));
+            return Ok(Self::Tilde(Self::parse_version(&s[1..])?));
         }
         if bytes[0] == b'>' {
             if s.len() > 1 && bytes[1] == b'=' {
-                return Ok(Self::GreaterOrEqual(
-                    semver::Version::parse(&s[2..])
-                        .map_err(|e| ConstraintParseError::InvalidVersion(e.to_string()))?,
-                ));
+                return Ok(Self::GreaterOrEqual(Self::parse_version(&s[2..])?));
             }
-            return Ok(Self::GreaterThan(semver::Version::parse(&s[1..]).map_err(
-                |e| ConstraintParseError::InvalidVersion(e.to_string()),
-            )?));
+            return Ok(Self::GreaterThan(Self::parse_version(&s[1..])?));
         }
         if bytes[0] == b'<' {
             if s.len() > 1 && bytes[1] == b'=' {
-                return Ok(Self::LessOrEqual(semver::Version::parse(&s[2..]).map_err(
-                    |e| ConstraintParseError::InvalidVersion(e.to_string()),
-                )?));
+                return Ok(Self::LessOrEqual(Self::parse_version(&s[2..])?));
             }
-            return Ok(Self::LessThan(semver::Version::parse(&s[1..]).map_err(
-                |e| ConstraintParseError::InvalidVersion(e.to_string()),
-            )?));
+            return Ok(Self::LessThan(Self::parse_version(&s[1..])?));
         }
 
         if s == "*" {
@@ -180,12 +218,10 @@ impl Constraint {
         }
 
         if s.contains('x') {
-            return Ok(Self::Wildcard(split_wildcard(s)));
+            return Ok(Self::Wildcard(split_wildcard(&s)));
         }
 
-        Ok(Self::Exact(semver::Version::parse(s).map_err(|e| {
-            ConstraintParseError::InvalidVersion(e.to_string())
-        })?))
+        Ok(Self::Exact(Self::parse_version(&s)?))
     }
 
     /// Per npm semver convention, a prerelease version should only satisfy a
