@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use codspeed_criterion_compat::{black_box, criterion_group, criterion_main, Criterion};
 
 use ara_resolver::graph::Graph;
 use ara_resolver::mvs::{ConstraintEntry, Resolver};

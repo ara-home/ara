@@ -1,8 +1,9 @@
 use std::io::Write;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use codspeed_criterion_compat::{black_box, criterion_group, criterion_main, Criterion};
 use tempfile::TempDir;
 
+use ara_cli::cli::install::{extract_tarball, hardlink_dir, install_bin_links};
 use ara_store::index::StoreIndex;
 
 fn make_tarball(n: usize) -> Vec<u8> {
@@ -36,8 +37,7 @@ fn bench_extract_tarball_100(c: &mut Criterion) {
     c.bench_function("extract_tarball_100", |b| {
         b.iter(|| {
             let tmp = TempDir::new().unwrap();
-            crate::cli::install::extract_tarball(black_box(&tarball), black_box(tmp.path()))
-                .unwrap();
+            extract_tarball(black_box(&tarball), black_box(tmp.path())).unwrap();
         });
     });
 }
@@ -47,8 +47,7 @@ fn bench_extract_tarball_1000(c: &mut Criterion) {
     c.bench_function("extract_tarball_1000", |b| {
         b.iter(|| {
             let tmp = TempDir::new().unwrap();
-            crate::cli::install::extract_tarball(black_box(&tarball), black_box(tmp.path()))
-                .unwrap();
+            extract_tarball(black_box(&tarball), black_box(tmp.path())).unwrap();
         });
     });
 }
@@ -58,8 +57,7 @@ fn bench_extract_tarball_5000(c: &mut Criterion) {
     c.bench_function("extract_tarball_5000", |b| {
         b.iter(|| {
             let tmp = TempDir::new().unwrap();
-            crate::cli::install::extract_tarball(black_box(&tarball), black_box(tmp.path()))
-                .unwrap();
+            extract_tarball(black_box(&tarball), black_box(tmp.path())).unwrap();
         });
     });
 }
@@ -116,8 +114,7 @@ fn bench_hardlink_dir_100(c: &mut Criterion) {
     c.bench_function("hardlink_dir_100", |b| {
         b.iter(|| {
             let dst = TempDir::new().unwrap();
-            crate::cli::install::hardlink_dir(black_box(src_dir.path()), black_box(dst.path()))
-                .unwrap();
+            hardlink_dir(black_box(src_dir.path()), black_box(dst.path())).unwrap();
         });
     });
 }
@@ -127,8 +124,7 @@ fn bench_hardlink_dir_1000(c: &mut Criterion) {
     c.bench_function("hardlink_dir_1000", |b| {
         b.iter(|| {
             let dst = TempDir::new().unwrap();
-            crate::cli::install::hardlink_dir(black_box(src_dir.path()), black_box(dst.path()))
-                .unwrap();
+            hardlink_dir(black_box(src_dir.path()), black_box(dst.path())).unwrap();
         });
     });
 }
@@ -164,7 +160,7 @@ fn bench_install_bin_links_10(c: &mut Criterion) {
     let (pkg_dir, pkg_name, nm_dir) = create_bin_package(10);
     c.bench_function("install_bin_links_10", |b| {
         b.iter(|| {
-            crate::cli::install::install_bin_links(
+            install_bin_links(
                 black_box(nm_dir.path()),
                 black_box(&pkg_name),
                 black_box(pkg_dir.path()),
@@ -178,7 +174,7 @@ fn bench_install_bin_links_50(c: &mut Criterion) {
     let (pkg_dir, pkg_name, nm_dir) = create_bin_package(50);
     c.bench_function("install_bin_links_50", |b| {
         b.iter(|| {
-            crate::cli::install::install_bin_links(
+            install_bin_links(
                 black_box(nm_dir.path()),
                 black_box(&pkg_name),
                 black_box(pkg_dir.path()),
