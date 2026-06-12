@@ -96,8 +96,8 @@ pub enum Constraint {
 pub enum ConstraintParseError {
     #[error("empty constraint string")]
     Empty,
-    #[error("invalid version: {0}")]
-    InvalidVersion(String),
+    #[error("invalid version '{input}': {detail}")]
+    InvalidVersion { input: String, detail: String },
 }
 
 fn split_wildcard(s: &str) -> WildcardParts {
@@ -168,8 +168,10 @@ impl Constraint {
             1 => format!("{s}.0"),
             _ => s.to_string(),
         };
-        semver::Version::parse(&expanded)
-            .map_err(|e| ConstraintParseError::InvalidVersion(e.to_string()))
+        semver::Version::parse(&expanded).map_err(|e| ConstraintParseError::InvalidVersion {
+            input: s.to_string(),
+            detail: e.to_string(),
+        })
     }
 
     pub fn parse(s: &str) -> Result<Self, ConstraintParseError> {

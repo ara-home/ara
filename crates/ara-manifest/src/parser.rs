@@ -7,17 +7,22 @@ use ara_types::Constraint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestParseError {
-    #[error("unknown source type")]
-    UnknownSourceType,
-    #[error("invalid risk level")]
-    InvalidRiskLevel,
+    #[error(
+        "unknown source type: '{0}'. valid types: npm, registry, github, git, local, workspace"
+    )]
+    UnknownSourceType(String),
+    #[error("invalid risk level: '{0}'. valid levels: low, medium, high, critical")]
+    InvalidRiskLevel(String),
     #[error("invalid name: {0}")]
     InvalidName(String),
     #[error("invalid version constraint: {0}")]
     InvalidConstraint(String),
-    #[allow(dead_code)]
-    #[error("json parse error: {0}")]
-    Json(String),
+    #[error("json parse error at line {line}, column {col}: {message}")]
+    Json {
+        line: usize,
+        col: usize,
+        message: String,
+    },
     #[error("toml parse error: {0}")]
     Toml(#[from] toml::de::Error),
 }
@@ -115,7 +120,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                 validate_name(&name)?;
                 let source = raw.source.unwrap_or_else(|| "npm".to_string());
                 if !valid_sources.contains(&source.as_str()) {
-                    return Err(ManifestParseError::UnknownSourceType);
+                    return Err(ManifestParseError::UnknownSourceType(source));
                 }
                 if let Some(ref ver) = raw.version {
                     if !ver.is_empty() {
@@ -146,7 +151,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
         .map(|s| {
             if let Some(ref threshold) = s.risk_threshold {
                 if !valid_risk_levels.contains(&threshold.as_str()) {
-                    return Err(ManifestParseError::InvalidRiskLevel);
+                    return Err(ManifestParseError::InvalidRiskLevel(threshold.clone()));
                 }
             }
             Ok(Security {
@@ -246,7 +251,7 @@ mod tests {
             foo = { source = "nonexistent", version = "1.0.0" }
         "#;
         match parse(src) {
-            Err(ManifestParseError::UnknownSourceType) => {}
+            Err(ManifestParseError::UnknownSourceType(_)) => {}
             other => panic!("expected UnknownSourceType, got {other:?}"),
         }
     }
@@ -262,7 +267,7 @@ mod tests {
             risk_threshold = "bogus"
         "#;
         match parse(src) {
-            Err(ManifestParseError::InvalidRiskLevel) => {}
+            Err(ManifestParseError::InvalidRiskLevel(_)) => {}
             other => panic!("expected InvalidRiskLevel, got {other:?}"),
         }
     }

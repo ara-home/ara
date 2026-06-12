@@ -4,9 +4,9 @@ use crate::types::Lockfile;
 pub enum LockfileParseError {
     #[error("toml parse error: {0}")]
     Toml(#[from] toml::de::Error),
-    #[error("unsupported lockfile version: {0}")]
+    #[error("unsupported lockfile version: {0}. expected: 1")]
     UnsupportedVersion(u32),
-    #[error("unknown resolver: {0}")]
+    #[error("unknown resolver: '{0}'. expected: 'mvs'")]
     UnknownResolver(String),
     #[error("invalid package entry: {0}")]
     InvalidPackage(String),
