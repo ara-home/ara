@@ -1,9 +1,0 @@
-[project]
-name = "constraints-app"
-version = "0.1.0"
-
-[deps]
-exact-dep = { source = "npm", version = "1.2.3" }
-caret-dep = { source = "npm", version = "^2.0.0" }
-tilde-dep = { source = "npm", version = "~3.1.0" }
-wildcard-dep = { source = "npm", version = "*" }

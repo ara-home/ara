@@ -1,7 +1,0 @@
-[project]
-name = "api"
-version = "0.1.0"
-
-[deps]
-express = { source = "npm", version = "^4.18.0" }
-lib = { source = "workspace" }

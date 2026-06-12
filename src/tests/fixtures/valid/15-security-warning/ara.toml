@@ -1,6 +1,0 @@
-[project]
-name = "security-test"
-version = "1.0.0"
-
-[deps]
-mal-pkg = { source = "npm", version = "1.0.0" }

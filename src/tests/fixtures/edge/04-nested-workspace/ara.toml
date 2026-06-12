@@ -1,9 +1,0 @@
-[project]
-name = "nested-workspace"
-version = "0.1.0"
-
-[deps]
-inner-a = { source = "workspace" }
-
-[workspace]
-members = ["packages/inner-a", "packages/inner-b"]

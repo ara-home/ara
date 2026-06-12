@@ -1,6 +1,0 @@
-[project]
-name = "inner-a"
-version = "0.1.0"
-
-[deps]
-inner-b = { source = "workspace" }

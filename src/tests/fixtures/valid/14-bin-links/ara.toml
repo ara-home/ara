@@ -1,6 +1,0 @@
-[project]
-name = "bin-links-test"
-version = "1.0.0"
-
-[deps]
-cli-tool = { source = "npm", version = "1.0.0" }

@@ -1,6 +1,0 @@
-[project]
-name = "workspace-array"
-version = "0.1.0"
-
-[workspace]
-members = ["packages/pkg-a", "packages/pkg-b"]

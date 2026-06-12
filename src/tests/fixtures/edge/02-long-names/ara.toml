@@ -1,3 +1,0 @@
-[project]
-name = "project-with-a-very-very-very-very-very-very-very-very-very-very-very-very-very-very-very-very-very-very-very-long-name-that-should-still-work-just-fine-because-there-is-no-limit-on-package-names-in-the-toml-format"
-version = "0.1.0"

@@ -1,6 +1,0 @@
-[project]
-name = "my-app"
-version = "1.0.0"
-
-[deps]
-"lodash" = { source = "npm", version = "4.17.21" }

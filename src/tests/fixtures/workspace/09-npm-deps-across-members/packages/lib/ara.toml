@@ -1,6 +1,0 @@
-[project]
-name = "lib"
-version = "0.1.0"
-
-[deps]
-lodash = { source = "npm", version = "^4.17.21" }

@@ -1,9 +1,0 @@
-[project]
-name = "npm-across-members"
-version = "0.1.0"
-
-[deps]
-zod = { source = "npm", version = "^3.0.0" }
-
-[workspace]
-members = ["packages/fe", "packages/api", "packages/lib"]

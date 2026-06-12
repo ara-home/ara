@@ -1,8 +1,0 @@
-{
-  "name": "workspace-object",
-  "version": "0.1.0",
-  "workspaces": {
-    "packages": ["packages/*"],
-    "nohoist": []
-  }
-}
