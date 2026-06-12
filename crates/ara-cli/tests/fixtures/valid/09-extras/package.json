@@ -1,0 +1,17 @@
+{
+  "name": "extras-app",
+  "version": "0.1.0",
+  "description": "A package with extras",
+  "main": "dist/index.js",
+  "bin": {
+    "my-cli": "./bin/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./utils": "./dist/utils.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

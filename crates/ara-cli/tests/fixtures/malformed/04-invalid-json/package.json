@@ -1,0 +1,5 @@
+{
+  "name": "bad-json",
+  "version": "0.1.0",
+  "dependencies": {
+    "react": "^18.0.0",

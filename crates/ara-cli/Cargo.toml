@@ -1,0 +1,82 @@
+[package]
+name = "ara-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A dependency manager with built-in security analysis"
+readme = "../../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+ara-types = { workspace = true }
+ara-util = { workspace = true }
+ara-store = { workspace = true }
+ara-source = { workspace = true }
+ara-analysis = { workspace = true }
+ara-manifest = { workspace = true }
+ara-lockfile = { workspace = true }
+ara-resolver = { workspace = true }
+ara-sandbox = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tar = { workspace = true }
+walkdir = { workspace = true }
+
+[features]
+nightly-bench = []
+
+[dev-dependencies]
+mockito = { workspace = true }
+tempfile = { workspace = true }
+codspeed-criterion-compat = { workspace = true }
+
+[[bin]]
+name = "ara"
+path = "src/main.rs"
+
+[[bench]]
+name = "install_bench"
+harness = false
+path = "benches/install_bench.rs"
+
+[[bench]]
+name = "resolver_bench"
+harness = false
+path = "benches/resolver_bench.rs"
+
+[[bench]]
+name = "security_bench"
+harness = false
+path = "benches/security_bench.rs"
+
+[[bench]]
+name = "util_bench"
+harness = false
+path = "benches/util_bench.rs"
+
+[[bench]]
+name = "manifest_bench"
+harness = false
+path = "benches/manifest_bench.rs"
+
+[[bench]]
+name = "lockfile_bench"
+harness = false
+path = "benches/lockfile_bench.rs"
+
+[[bench]]
+name = "source_bench"
+harness = false
+path = "benches/source_bench.rs"

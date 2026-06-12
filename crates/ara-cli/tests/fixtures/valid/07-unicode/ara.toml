@@ -1,0 +1,9 @@
+[project]
+name = "cafe-fire-app"
+version = "0.1.0"
+
+[deps]
+"from-árvore" = { source = "local", path = "packages/árvore" }
+
+[workspace]
+members = ["packages/árvore"]

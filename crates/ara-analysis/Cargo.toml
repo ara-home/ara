@@ -1,0 +1,23 @@
+[package]
+name = "ara-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Security pattern scanning for Ara"
+readme = "../../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+ara-types = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+nightly-bench = []

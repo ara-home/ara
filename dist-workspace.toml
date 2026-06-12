@@ -1,0 +1,31 @@
+[workspace]
+members = ["cargo:crates/ara-cli"]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+# Create releases by pushing a version tag (e.g. v0.1.0)
+dispatch-releases = false
+# Enable SLSA build provenance attestations
+github-attestations = true
+# Run 'dist plan' on PRs to detect breakage early
+pr-run-mode = "plan"
+# Post-announce jobs to run after a release
+post-announce-jobs = ["./update-release-notes"]
+# Pin all GitHub Action SHAs for supply-chain security
+[dist.github-action-commits]
+"actions/checkout" = "df4cb1c069e1874edd31b4311f1884172cec0e10"
+"actions/upload-artifact" = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+"actions/download-artifact" = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+"actions/attest-build-provenance" = "b3e506e8c389afc651c5bacf2b8f2a1ea0557215"

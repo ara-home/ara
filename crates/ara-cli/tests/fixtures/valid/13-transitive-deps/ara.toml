@@ -1,0 +1,6 @@
+[project]
+name = "transitive-test"
+version = "1.0.0"
+
+[deps]
+dep-a = { source = "npm", version = "1.0.0" }

@@ -1,0 +1,7 @@
+[project]
+name = "app-2"
+version = "0.1.0"
+
+[deps]
+shared = { source = "workspace" }
+lodash = { source = "npm", version = "^4.17.21" }

@@ -1,0 +1,6 @@
+[project]
+name = "deeply-nested"
+version = "0.1.0"
+
+[workspace]
+members = ["packages/group-a/pkg-aa", "packages/group-b/pkg-bb"]
