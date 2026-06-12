@@ -50,9 +50,9 @@ impl fmt::Display for InstallTarget {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseSpecError {
-    #[error("empty spec")]
+    #[error("install spec is empty or contains only whitespace")]
     Empty,
-    #[error("unknown spec format: '{0}'")]
+    #[error("unknown install spec format: '{0}'")]
     UnknownFormat(String),
 }
 

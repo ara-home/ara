@@ -30,7 +30,11 @@ struct PackageJsonRaw {
 
 pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError> {
     let raw: PackageJsonRaw =
-        serde_json::from_str(content).map_err(|e| ManifestParseError::Json(e.to_string()))?;
+        serde_json::from_str(content).map_err(|e| ManifestParseError::Json {
+            line: e.line(),
+            col: e.column(),
+            message: e.to_string(),
+        })?;
 
     let name = raw
         .name
@@ -432,7 +436,7 @@ mod tests {
     fn test_parse_invalid_json() {
         let json = r#"not valid json"#;
         match parse_package_json(json) {
-            Err(ManifestParseError::Json(_)) => {}
+            Err(ManifestParseError::Json { .. }) => {}
             other => panic!("expected Json error, got {other:?}"),
         }
     }
