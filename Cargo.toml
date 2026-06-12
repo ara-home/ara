@@ -1,11 +1,62 @@
 [workspace]
+resolver = "2"
 members = [
-    "src"
+    "crates/ara-types",
+    "crates/ara-util",
+    "crates/ara-store",
+    "crates/ara-source",
+    "crates/ara-analysis",
+    "crates/ara-manifest",
+    "crates/ara-lockfile",
+    "crates/ara-resolver",
+    "crates/ara-sandbox",
+    "crates/ara-cli",
 ]
 
-resolver = "2"
+[workspace.package]
+version = "0.11.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ara-home/ara"
 
-# The profile that 'dist' will build with
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+toml = "1.0"
+regex = "1"
+walkdir = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tar = "0.4"
+flate2 = "1"
+tempfile = "3"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+chrono = { version = "0.4", features = ["clock"] }
+semver = { version = "1", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+base64 = "0.22"
+mockito = "1"
+codspeed-criterion-compat = { version = "3", package = "codspeed-criterion-compat" }
+
+ara-types = { path = "crates/ara-types" }
+ara-util = { path = "crates/ara-util" }
+ara-store = { path = "crates/ara-store" }
+ara-source = { path = "crates/ara-source" }
+ara-analysis = { path = "crates/ara-analysis" }
+ara-manifest = { path = "crates/ara-manifest" }
+ara-lockfile = { path = "crates/ara-lockfile" }
+ara-resolver = { path = "crates/ara-resolver" }
+ara-sandbox = { path = "crates/ara-sandbox" }
+ara-cli = { path = "crates/ara-cli" }
+
 [profile.dist]
 inherits = "release"
 lto = "thin"

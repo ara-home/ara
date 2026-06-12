@@ -1,0 +1,14 @@
+[package]
+name = "ara-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux seccomp-BPF sandboxed execution"
+readme = "../../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "ara-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Content-addressable storage layer for Ara"
+readme = "../../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+ara-util = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+nightly-bench = []
+
+[dev-dependencies]
+tempfile = { workspace = true }

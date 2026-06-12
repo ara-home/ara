@@ -1,0 +1,15 @@
+[package]
+name = "ara-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types for the Ara package manager"
+readme = "../../README.md"
+keywords = ["package-manager", "security", "javascript", "typescript"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+serde = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }

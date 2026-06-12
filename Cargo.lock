@@ -110,10 +110,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "ara"
+name = "ara-analysis"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "ara-types",
+ "regex",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+]
+
+[[package]]
+name = "ara-cli"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "ara-analysis",
+ "ara-lockfile",
+ "ara-manifest",
+ "ara-resolver",
+ "ara-sandbox",
+ "ara-source",
+ "ara-store",
+ "ara-types",
+ "ara-util",
  "base64",
  "chrono",
  "clap",
@@ -122,22 +143,102 @@ dependencies = [
  "futures",
  "glob",
  "hex",
- "libc",
  "mockito",
- "regex",
- "reqwest",
- "rusqlite",
- "semver",
  "serde",
  "serde_json",
- "sha2",
  "tar",
  "tempfile",
  "thiserror",
  "tokio",
- "toml",
- "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "ara-lockfile"
+version = "0.11.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "ara-manifest"
+version = "0.11.0"
+dependencies = [
+ "ara-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "ara-resolver"
+version = "0.11.0"
+dependencies = [
+ "ara-types",
+ "ara-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ara-sandbox"
+version = "0.11.0"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
+name = "ara-source"
+version = "0.11.0"
+dependencies = [
+ "ara-types",
+ "ara-util",
+ "flate2",
+ "mockito",
+ "reqwest",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "ara-store"
+version = "0.11.0"
+dependencies = [
+ "ara-util",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ara-types"
+version = "0.11.0"
+dependencies = [
+ "semver",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "ara-util"
+version = "0.11.0"
+dependencies = [
+ "hex",
+ "mockito",
+ "reqwest",
+ "sha2",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

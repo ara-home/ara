@@ -34,19 +34,15 @@ jobs:
           tool: cargo-deny
 
       - name: Unit tests
-        working-directory: src
         run: cargo test --lib --quiet
 
       - name: Fixture tests
-        working-directory: src
-        run: cargo test --test fixture_test --quiet
+        run: cargo test -p ara-cli --test fixture_test --quiet
 
       - name: Clippy
-        working-directory: src
         run: cargo clippy -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::cargo -A clippy::multiple_crate_versions
 
       - name: Format
-        working-directory: src
         run: cargo fmt --check
 
       - name: Audit
@@ -74,5 +70,5 @@ jobs:
           tool: cargo-udeps
 
       - name: UDeps
-        working-directory: src
+        working-directory: crates/ara-cli
         run: cargo udeps
