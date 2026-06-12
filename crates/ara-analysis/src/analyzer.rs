@@ -8,28 +8,47 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
+use regex::RegexSet;
 
 use ara_types::{AnalysisResult, Finding, RiskLevel};
 
 use super::patterns::{all_patterns, install_scripts_pattern, Pattern};
 use super::scanner::scan_package;
 
-static COMPILED: LazyLock<Vec<(&'static Pattern, Regex)>> = LazyLock::new(|| {
-    all_patterns()
-        .iter()
-        .filter_map(|p| {
-            if p.regex.is_empty() {
-                return None;
+struct CompiledPatterns {
+    set: RegexSet,
+    patterns: Vec<(&'static Pattern, Regex)>,
+}
+
+static COMPILED: LazyLock<CompiledPatterns> = LazyLock::new(|| {
+    let all = all_patterns();
+    let mut pattern_strs: Vec<&'static str> = Vec::with_capacity(all.len());
+    let mut patterns: Vec<(&'static Pattern, Regex)> = Vec::with_capacity(all.len());
+
+    for p in all.iter() {
+        if p.regex.is_empty() {
+            continue;
+        }
+        match Regex::new(p.regex) {
+            Ok(re) => {
+                pattern_strs.push(p.regex);
+                patterns.push((p, re));
             }
-            match Regex::new(p.regex) {
-                Ok(re) => Some((p, re)),
-                Err(e) => {
-                    eprintln!("warning: failed to compile regex for `{}`: {e}", p.id);
-                    None
-                }
+            Err(e) => {
+                eprintln!("warning: failed to compile regex for `{}`: {e}", p.id);
             }
-        })
-        .collect()
+        }
+    }
+
+    let set = match RegexSet::new(pattern_strs) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: failed to build regex set: {e}");
+            RegexSet::empty()
+        }
+    };
+
+    CompiledPatterns { set, patterns }
 });
 
 fn glob_matches(glob: &str, filename: &str) -> bool {
@@ -104,8 +123,13 @@ pub fn analyze_package(package_path: &Path) -> Result<AnalysisResult> {
             continue;
         }
 
-        // run code patterns using regex find_iter for precise locations
-        for (pattern, re) in compiled {
+        // fast pre-filter: single pass over file content to find matching patterns
+        let matching = compiled.set.matches(&file.content);
+
+        // only run find_iter on patterns that matched the file
+        for idx in matching.iter() {
+            let (pattern, re) = &compiled.patterns[idx];
+
             if !glob_matches(pattern.file_glob, filename) {
                 continue;
             }
