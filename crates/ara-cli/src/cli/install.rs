@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use ara_analysis::analyzer;
 use ara_lockfile::types::{GraphMeta, Lockfile, PackageEntry, SecurityMeta};
@@ -351,10 +352,8 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
                     if is_first {
                         common = comp.map(|c| c.as_os_str().to_os_string());
                         is_first = false;
-                    } else if common.is_some() {
-                        if comp.map(|c| c.as_os_str()) != common.as_deref() {
-                            common = None;
-                        }
+                    } else if common.is_some() && comp.map(|c| c.as_os_str()) != common.as_deref() {
+                        common = None;
                     }
                     if path.components().count() > 1 {
                         has_files = true;
@@ -837,8 +836,8 @@ async fn install_transitive_deps(
     let mut total_tasks = 0usize;
     // Collect fresh download entries for batch SQLite insert — avoids
     // N concurrent tasks fighting over the StoreIndex mutex.
-    let index_pending: Arc<std::sync::Mutex<Vec<(String, String, String, i64)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    type IndexPending = Arc<std::sync::Mutex<Vec<(String, String, String, i64)>>>;
+    let index_pending: IndexPending = Arc::new(std::sync::Mutex::new(Vec::new()));
     // Debug counters for cumulative time breakdown
     let total_fetch_us: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let total_extract_us: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
@@ -851,11 +850,11 @@ async fn install_transitive_deps(
         if initial_pkgs.contains(dep_name) {
             continue;
         }
-        total_tasks += 1;
         let parsed_ver = match Version::parse(exact_ver) {
             Ok(v) => v,
             Err(_) => continue,
         };
+        total_tasks += 1;
         let short_ver = format!(
             "{}.{}.{}",
             parsed_ver.major, parsed_ver.minor, parsed_ver.patch
@@ -930,10 +929,12 @@ async fn install_transitive_deps(
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         eprintln!("    failed to extract {}: {}", dep_name, e);
+                        let _ = tx.send(None).await;
                         return;
                     }
                     Err(e) => {
                         eprintln!("    failed to extract {} (task panic): {}", dep_name, e);
+                        let _ = tx.send(None).await;
                         return;
                     }
                 }
@@ -947,6 +948,7 @@ async fn install_transitive_deps(
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("    warning: failed to fetch {}: {}", dep_name, e);
+                    let _ = tx.send(None).await;
                     return;
                 }
             };
@@ -1004,28 +1006,31 @@ async fn install_transitive_deps(
                 }
                 Ok(None) => {
                     eprintln!("    warning: skipped {} (store failed)", dep_name);
+                    let _ = tx.send(None).await;
                 }
                 Err(e) => {
                     eprintln!("    failed {} (task panic): {}", dep_name, e);
+                    let _ = tx.send(None).await;
                 }
             }
         }));
     }
     drop(tx);
 
+    let pb = ProgressBar::new(total_tasks as u64);
+    pb.set_style(
+        ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .context("invalid progress bar template")?
+            .progress_chars("##-"),
+    );
     let mut results: Vec<(String, String, String)> = Vec::new();
-    let mut last_progress = 0usize;
     while let Some(item) = rx.recv().await {
         if let Some(entry) = item {
             results.push(entry);
         }
-        let done = results.len();
-        let remaining = total_tasks.saturating_sub(done);
-        if done - last_progress >= 20 || remaining == 0 {
-            eprintln!("  progress: {done}/{total_tasks}, {remaining} remaining");
-            last_progress = done;
-        }
+        pb.inc(1);
     }
+    pb.finish_and_clear();
     let fresh = total_tasks.saturating_sub(cache_hits.load(Ordering::Relaxed) as usize);
     let fetch_s = total_fetch_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
     let extract_s = total_extract_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
@@ -1794,8 +1799,35 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
             });
         }
     }
-    let results = futures::future::join_all(tasks).await;
-    for (i, version) in results.into_iter().flatten() {
+
+    let total_resolve = tasks.len() as u64;
+    let pb_resolve = ProgressBar::new(total_resolve);
+    pb_resolve.set_style(
+        ProgressStyle::with_template("{spinner:.green} resolving versions... {pos}/{len}")
+            .context("invalid progress bar template")?
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+
+    let tasks: Vec<_> = tasks
+        .into_iter()
+        .map(|task| {
+            let pb = pb_resolve.clone();
+            async move {
+                let r = task.await;
+                pb.inc(1);
+                r
+            }
+        })
+        .collect();
+
+    let results: Vec<_> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    pb_resolve.finish_and_clear();
+
+    for (i, version) in results {
         graph.nodes[i].version = version;
     }
     eprintln!(
@@ -2298,10 +2330,8 @@ pub fn hardlink_dir(src: &Path, dst: &Path) -> Result<()> {
             {
                 let _ = std::fs::copy(entry.path(), &target);
             }
-        } else {
-            if std::fs::hard_link(entry.path(), &target).is_err() {
-                let _ = std::fs::copy(entry.path(), &target);
-            }
+        } else if std::fs::hard_link(entry.path(), &target).is_err() {
+            let _ = std::fs::copy(entry.path(), &target);
         }
     }
     Ok(())

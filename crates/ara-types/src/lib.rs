@@ -136,9 +136,7 @@ fn normalize_operators(s: &str) -> String {
             while i < s.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
             }
-        } else if i + 1 < s.len()
-            && ((bytes[i] == b'>' && bytes[i + 1] == b'=')
-                || (bytes[i] == b'<' && bytes[i + 1] == b'='))
+        } else if i + 1 < s.len() && (bytes[i] == b'<' || bytes[i] == b'>') && bytes[i + 1] == b'='
         {
             out.push(bytes[i] as char);
             out.push(bytes[i + 1] as char);

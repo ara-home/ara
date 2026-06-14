@@ -107,6 +107,7 @@ fn mock_npm_package(server: &mut mockito::Server, name: &str, version: &str) -> 
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(versions_body.to_string())
+        .expect_at_least(1)
         .create();
 
     // Tarball endpoint:  GET /{name}/-/{bare_name}-{version}.tgz
@@ -172,6 +173,7 @@ fn mock_npm_package_with_deps(
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(versions_body.to_string())
+        .expect_at_least(1)
         .create();
 
     let tarball = make_minimal_tarball();
