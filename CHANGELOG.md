@@ -1,4 +1,23 @@
 
+## [0.12.0] - 2026-06-14
+
+### 🚀 Features
+
+- Improved parser error messages and security performance (#42)
+- Add real-time progress bars during install (#43)
+
+### 🐛 Bug Fixes
+
+- Handle shorthand versions and operator whitespace in constraint parsing (#38)
+- *(security)* Sandbox hardening, HTTP enforcement, tarball/file/workspace validation, SRI propagation (#44)
+
+### 🚜 Refactor
+
+- Migrate to Cargo Workspaces with multi-crate structure (#40)
+
+### 📚 Documentation
+
+- Update CHANGELOG.md (#36)
 ## [0.11.0] - 2026-06-09
 
 ### 🚀 Features
