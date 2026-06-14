@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -274,6 +274,8 @@ fn expand_workspace_members(
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
 
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+
     for pattern in &workspace.members {
         let full_pattern = cwd.join(pattern);
         let full_str = full_pattern.to_string_lossy().to_string();
@@ -297,6 +299,17 @@ fn expand_workspace_members(
 
             if !entry.is_dir() {
                 continue;
+            }
+
+            // Reject path traversal: verify resolved entry is within workspace root
+            if let Ok(canonical_entry) = entry.canonicalize() {
+                if !canonical_entry.starts_with(&canonical_cwd) {
+                    eprintln!(
+                        "  warning: workspace member {} escapes workspace root, skipping",
+                        entry.display()
+                    );
+                    continue;
+                }
             }
 
             let manifest = match read_member_manifest(&entry) {
@@ -336,6 +349,49 @@ fn expand_workspace_members(
     entries
 }
 
+/// Returns `true` if `rel_path`, joined onto a base directory, would resolve to
+/// a location outside that base (path traversal). This performs the same
+/// containment check as normalizing `base.join(rel_path)` and verifying it
+/// stays under `base`, but without any heap allocation: it tracks the component
+/// depth relative to the base and rejects absolute paths or any `..` that would
+/// escape above the root.
+fn rel_path_escapes(rel_path: &str) -> bool {
+    let mut depth: i32 = 0;
+    for component in Path::new(rel_path).components() {
+        match component {
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::CurDir => {}
+            // An absolute path (root or prefix) would replace the base entirely.
+            Component::RootDir | Component::Prefix(_) => return true,
+            Component::Normal(_) => depth += 1,
+        }
+    }
+    false
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                components.pop();
+            }
+            Component::CurDir => {}
+            other => components.push(other.as_os_str().to_os_string()),
+        }
+    }
+    let mut result = PathBuf::new();
+    for c in components {
+        result.push(c);
+    }
+    result
+}
+
 pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     // Pass 1: detect prefix without allocating file data
     let prefix = {
@@ -369,6 +425,9 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
     };
 
+    std::fs::create_dir_all(dest).context("failed to create extraction directory")?;
+    let canonical_dest = dest.canonicalize().context("failed to canonicalize dest")?;
+
     // Pass 2: extract streaming directly to disk
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
@@ -388,11 +447,39 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         let target = dest.join(stripped);
+        let normalized = normalize_path(&target);
+        if !normalized.starts_with(&canonical_dest) {
+            anyhow::bail!("path traversal detected in tarball: {}", stripped.display());
+        }
+
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         entry.unpack(&target).context("failed to unpack entry")?;
+
+        // Strip dangerous permissions: remove setuid/setgid/sticky bits
+        // and world-writable, keep owner/group/other read/write/execute as-is
+        if let Ok(metadata) = std::fs::metadata(&target) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                const CLEAN_MASK: u32 = 0o7777 & !(0o7000 | 0o0002);
+                let mode = metadata.permissions().mode();
+                let cleaned = mode & CLEAN_MASK;
+                if mode != cleaned {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(cleaned);
+                    let _ = std::fs::set_permissions(&target, perms);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut perms = metadata.permissions();
+                perms.set_readonly(!perms.readonly());
+                let _ = std::fs::set_permissions(&target, perms);
+            }
+        }
     }
 
     Ok(())
@@ -435,9 +522,17 @@ pub fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) ->
 
     for (name, rel_path) in &bin_entries {
         let link = bin_dir.join(name);
+        if rel_path_escapes(rel_path) {
+            eprintln!(
+                "  warning: bin path '{}' escapes package directory, skipping {name}",
+                rel_path
+            );
+            continue;
+        }
+        let actual_file = pkg_dir.join(rel_path);
+
         #[allow(unused_variables)]
         let target = format!("../{}/{}", pkg_name, rel_path);
-        let actual_file = pkg_dir.join(rel_path);
 
         #[cfg(unix)]
         if let Ok(metadata) = std::fs::metadata(&actual_file) {
@@ -507,12 +602,14 @@ fn collect_installed_names(node_modules: &Path) -> Vec<String> {
 }
 
 /// Extract and sort all version strings from package metadata.
-/// Compact extracted metadata: only versions + dependency maps,
+/// Compact extracted metadata: only versions + dependency maps + integrity,
 /// avoids storing the full npm registry response (30MB+ for next.js).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PackageMeta {
     versions: Vec<String>,
     deps: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    integrity: HashMap<String, String>,
 }
 
 fn registry_cache_dir() -> Option<PathBuf> {
@@ -525,9 +622,22 @@ fn registry_cache_dir() -> Option<PathBuf> {
     )
 }
 
+fn safe_cache_name(name: &str) -> String {
+    let name = name.replace('/', "_").replace('@', "");
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn read_package_meta(name: &str) -> Option<PackageMeta> {
     let dir = registry_cache_dir()?;
-    let safe_name = name.replace('/', "_").replace('@', "");
+    let safe_name = safe_cache_name(name);
     let path = dir.join(format!("{safe_name}.json"));
     if !path.exists() {
         return None;
@@ -551,7 +661,7 @@ fn write_package_meta(name: &str, meta: &PackageMeta) {
         Some(d) => d,
         None => return,
     };
-    let safe_name = name.replace('/', "_").replace('@', "");
+    let safe_name = safe_cache_name(name);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("  warning: failed to create registry cache dir: {e}");
         return;
@@ -565,7 +675,7 @@ fn write_package_meta(name: &str, meta: &PackageMeta) {
     let _ = serde_json::to_writer(writer, meta);
 }
 
-/// Extract sorted versions + dependency map from full npm metadata JSON.
+/// Extract sorted versions + dependency map + integrity from full npm metadata JSON.
 fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
     let versions_map = meta["versions"].as_object().cloned().unwrap_or_default();
     let mut versions: Vec<String> = versions_map.keys().cloned().collect();
@@ -578,7 +688,8 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
         }
     });
     let mut deps: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for (ver_str, ver_data) in versions_map {
+    let mut integrity: HashMap<String, String> = HashMap::new();
+    for (ver_str, ver_data) in &versions_map {
         let mut deps_map = HashMap::new();
         if let Some(dep_map) = ver_data["dependencies"].as_object() {
             for (k, v) in dep_map {
@@ -597,8 +708,21 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
         if !deps_map.is_empty() {
             deps.insert(ver_str.clone(), deps_map);
         }
+        // Extract integrity hash from dist metadata (npm registry)
+        let dist = &ver_data["dist"];
+        let hash = dist["integrity"]
+            .as_str()
+            .or_else(|| dist["shasum"].as_str())
+            .map(|s| s.to_string());
+        if let Some(h) = hash {
+            integrity.insert(ver_str.clone(), h);
+        }
     }
-    PackageMeta { versions, deps }
+    PackageMeta {
+        versions,
+        deps,
+        integrity,
+    }
 }
 
 async fn install_transitive_deps(
@@ -846,6 +970,17 @@ async fn install_transitive_deps(
     let nm = node_modules;
     let cache_hits_ref = Arc::clone(&cache_hits);
     let mut tasks = Vec::new();
+    // Pre-compute content hashes from metadata for integrity verification
+    let content_hashes: HashMap<String, Option<String>> = resolution
+        .iter()
+        .map(|(name, ver)| {
+            let hash = meta_cache
+                .get(name)
+                .and_then(|pm| pm.integrity.get(ver))
+                .cloned();
+            (name.clone(), hash)
+        })
+        .collect();
     for (dep_name, exact_ver) in &resolution {
         if initial_pkgs.contains(dep_name) {
             continue;
@@ -870,6 +1005,7 @@ async fn install_transitive_deps(
         let reg_ref = reg.clone();
         let store_ref = store.clone();
         let nm = nm.to_path_buf();
+        let content_hash = content_hashes.get(&dep_name).and_then(|h| h.clone());
 
         tasks.push(tokio::spawn(async move {
             let dep_dir = nm.join(&dep_name);
@@ -889,7 +1025,7 @@ async fn install_transitive_deps(
                 source: SourceType::Npm,
                 name: dep_name.clone(),
                 version: parsed_ver.clone(),
-                content_hash: None,
+                content_hash,
                 requested_ref: None,
             };
 
@@ -1055,12 +1191,13 @@ async fn install_transitive_deps(
     }
 
     for (dep_name, short_ver, hash_str) in &results {
+        let integrity = content_hashes.get(dep_name).and_then(|h| h.clone());
         pkg_entries.push(PackageEntry {
             name: dep_name.clone(),
             version: short_ver.clone(),
             source: "npm".to_string(),
             package_hash: hash_str.clone(),
-            integrity: None,
+            integrity,
             signature: None,
             repository: None,
             commit: None,
@@ -1349,7 +1486,7 @@ pub(crate) async fn cmd_install_specs(
                             risk_level: Some(result.risk_level.to_string()),
                         }),
                     )
-                } else if non_interactive || result.risk_level <= RiskLevel::Medium {
+                } else if result.risk_level <= RiskLevel::Medium {
                     let rl = result.risk_level;
                     print!(
                         "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — auto-approved",
@@ -1365,6 +1502,30 @@ pub(crate) async fn cmd_install_specs(
                             risk_level: Some(rl.to_string()),
                         }),
                     )
+                } else if non_interactive {
+                    eprintln!(
+                        "  ⚠  {}@{} ({}) — {} finding(s) ({}) — bypassed in non-interactive mode",
+                        meta.name,
+                        ver_str,
+                        hash_str,
+                        result.findings.len(),
+                        result.risk_level
+                    );
+                    for finding in &result.findings {
+                        let loc = finding.location.as_deref().unwrap_or("<unknown>");
+                        eprintln!(
+                            "    ⚠  [{}] {} — {}",
+                            finding.severity, finding.pattern, loc
+                        );
+                        if !finding.description.is_empty() {
+                            eprintln!("         {}", finding.description);
+                        }
+                    }
+                    eprintln!(
+                        "  tip: re-run interactively to review or use --force to install anyway"
+                    );
+                    let _ = std::fs::remove_dir_all(&pkg_dir);
+                    (false, None)
                 } else {
                     match prompt_allow_package(&meta.name, &ver_str, &result.findings) {
                         AllowDecision::Yes | AllowDecision::Sandbox => {
@@ -1410,7 +1571,7 @@ pub(crate) async fn cmd_install_specs(
             version: ver_str.clone(),
             source: meta.source_type.to_string(),
             package_hash: hash_str.clone(),
-            integrity: None,
+            integrity: meta.integrity.clone(),
             signature: None,
             repository: meta.repo.clone(),
             commit: meta.commit.clone(),
@@ -1460,6 +1621,7 @@ struct ResolvedMeta {
     url: Option<String>,
     repo: Option<String>,
     commit: Option<String>,
+    integrity: Option<String>,
 }
 
 /// Fetch content for a resolved meta, returning raw bytes.
@@ -1473,7 +1635,7 @@ async fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 source: SourceType::Npm,
                 name: meta.name.clone(),
                 version: meta.version_semver.clone(),
-                content_hash: None,
+                content_hash: meta.integrity.clone(),
                 requested_ref: None,
             };
             reg.fetch(&identity)
@@ -1567,6 +1729,16 @@ async fn resolve_npm_meta(
     let parsed_ver = Version::parse(&resolved_ver_str)
         .with_context(|| format!("invalid version from registry: {resolved_ver_str}"))?;
 
+    // Fetch metadata to extract integrity hash for the resolved version
+    let integrity = reg.fetch_metadata(name).await.ok().and_then(|meta| {
+        let ver_data = meta["versions"][&resolved_ver_str].as_object()?;
+        let dist = ver_data.get("dist")?;
+        dist["integrity"]
+            .as_str()
+            .or_else(|| dist["shasum"].as_str())
+            .map(|s| s.to_string())
+    });
+
     Ok(ResolvedMeta {
         name: name.to_string(),
         version: manifest_ver,
@@ -1576,6 +1748,7 @@ async fn resolve_npm_meta(
         url: None,
         repo: None,
         commit: None,
+        integrity,
     })
 }
 
@@ -1590,6 +1763,7 @@ fn resolve_github_meta(repo: &str, commit: Option<&str>) -> Result<ResolvedMeta>
         url: None,
         repo: Some(repo.to_string()),
         commit: commit.map(|c| c.to_string()),
+        integrity: None,
     })
 }
 
@@ -1606,6 +1780,7 @@ fn resolve_git_meta(url: &str, commit: Option<&str>) -> Result<ResolvedMeta> {
         url: Some(url.to_string()),
         repo: None,
         commit: Some(commit_str),
+        integrity: None,
     })
 }
 
@@ -1620,6 +1795,7 @@ fn resolve_tarball_meta(url: &str) -> Result<ResolvedMeta> {
         url: Some(url.to_string()),
         repo: None,
         commit: None,
+        integrity: None,
     })
 }
 

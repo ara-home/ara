@@ -3,6 +3,39 @@ use std::process::Command;
 use crate::SourceError;
 use ara_types::PackageIdentity;
 
+const ALLOWED_GIT_SCHEMES: &[&str] = &["https://", "ssh://", "git://", "git+https://"];
+
+fn validate_git_url(url: &str) -> Result<(), SourceError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(SourceError::GitError("empty git URL".to_string()));
+    }
+    let lower = trimmed.to_lowercase();
+    // Reject file:// and ext:// explicitly
+    if lower.starts_with("file://") {
+        return Err(SourceError::GitError(
+            "file:// git URLs are not allowed for security reasons".to_string(),
+        ));
+    }
+    if lower.starts_with("ext:") {
+        return Err(SourceError::GitError(
+            "ext: git protocol is not allowed for security reasons".to_string(),
+        ));
+    }
+    // If URL has a scheme, only allow known secure ones
+    if trimmed.contains("://") {
+        let allowed = ALLOWED_GIT_SCHEMES.iter().any(|s| lower.starts_with(s));
+        if !allowed {
+            return Err(SourceError::GitError(format!(
+                "disallowed git URL scheme: {}. allowed schemes: https://, ssh://, git://",
+                trimmed.split("://").next().unwrap_or(trimmed)
+            )));
+        }
+    }
+    // No scheme or allowed scheme — acceptable (local paths have no scheme)
+    Ok(())
+}
+
 pub struct GitSource {
     pub url: String,
     pub commit: String,
@@ -20,6 +53,8 @@ impl GitSource {
     }
 
     pub async fn fetch(&self, identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+        validate_git_url(&self.url)?;
+
         let tmp_dir = tempfile::Builder::new()
             .prefix("ara-git-")
             .tempdir()
@@ -31,9 +66,13 @@ impl GitSource {
         if ref_str == "HEAD" {
             // Shallow clone the default branch
             let status = Command::new("git")
-                .args(["clone", "--depth", "1", &self.url])
-                .arg(&tmp_path)
-                .current_dir("/tmp")
+                .args([
+                    "clone",
+                    "--depth",
+                    "1",
+                    &self.url,
+                    &tmp_path.to_string_lossy(),
+                ])
                 .status()
                 .map_err(|e| SourceError::GitError(format!("failed to run git: {e}")))?;
             if !status.success() {
@@ -132,7 +171,8 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         create_git_repo(repo_dir.path());
 
-        let url = format!("file://{}", repo_dir.path().display());
+        // Use the path directly (git accepts local paths without file://)
+        let url = repo_dir.path().to_string_lossy().to_string();
         let src = GitSource::new(url, "HEAD".to_string());
 
         let identity = ara_types::PackageIdentity {
@@ -156,5 +196,45 @@ mod tests {
             "abc123".to_string(),
         );
         assert_eq!(src.resolve("any").await.unwrap(), "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_validate_rejects_file_url() {
+        let src = GitSource::new("file:///etc/passwd".to_string(), "HEAD".to_string());
+        let identity = ara_types::PackageIdentity {
+            source: ara_types::SourceType::Git,
+            name: "test".to_string(),
+            version: ara_types::Version::parse("0.1.0").unwrap(),
+            content_hash: None,
+            requested_ref: None,
+        };
+        let result = src.fetch(&identity).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not allowed"),
+            "expected 'not allowed' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_rejects_empty_url() {
+        let src = GitSource::new("".to_string(), "HEAD".to_string());
+        let identity = ara_types::PackageIdentity {
+            source: ara_types::SourceType::Git,
+            name: "test".to_string(),
+            version: ara_types::Version::parse("0.1.0").unwrap(),
+            content_hash: None,
+            requested_ref: None,
+        };
+        let result = src.fetch(&identity).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_allows_https() {
+        assert!(validate_git_url("https://github.com/user/repo.git").is_ok());
+        assert!(validate_git_url("ssh://git@github.com/user/repo.git").is_ok());
+        assert!(validate_git_url("git://github.com/user/repo.git").is_ok());
     }
 }

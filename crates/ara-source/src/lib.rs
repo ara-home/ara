@@ -25,6 +25,8 @@ pub enum SourceError {
     ParseError(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("integrity mismatch: expected {expected}, got {actual}")]
+    IntegrityMismatch { expected: String, actual: String },
 }
 
 pub enum Source {

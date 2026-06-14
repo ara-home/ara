@@ -7,18 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ara_sandbox::executor::Executor;
 use ara_sandbox::profiles::{Profile, SandboxConfig};
 
-fn quote_arg(arg: &str) -> String {
-    if arg
-        .chars()
-        .all(|c| c.is_alphanumeric() || "-_=/.".contains(c))
-        && !arg.is_empty()
-    {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
-}
-
 pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let ts = SystemTime::now()
@@ -74,7 +62,6 @@ pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
 
     if !bin_path.exists() {
         if let Ok(mut entries) = std::fs::read_dir(&bin_dir) {
-            // Find the first executable if the exact name doesn't exist
             if let Some(Ok(entry)) = entries.next() {
                 bin_path = entry.path();
             }
@@ -97,21 +84,10 @@ pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
         format!("{}:{}", canonical.display(), current_path),
     );
 
-    let bin_name = bin_path
-        .file_name()
-        .context("invalid bin path")?
-        .to_string_lossy();
-
-    let mut cmd_str = bin_name.to_string();
-    for arg in args {
-        cmd_str.push(' ');
-        cmd_str.push_str(&quote_arg(arg));
-    }
-
     let config = SandboxConfig::for_profile(Profile::Open);
     let executor = Executor::new(config);
 
-    let exec_res = executor.execute(&cmd_str, Some(env));
+    let exec_res = executor.execute_program(&bin_path, args, Some(env));
 
     let _ = std::fs::remove_dir_all(&dlx_dir);
 
