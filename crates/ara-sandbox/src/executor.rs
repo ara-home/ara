@@ -3,6 +3,7 @@
 //! and Open (no restrictions).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 
 #[cfg(unix)]
@@ -26,14 +27,16 @@ impl Executor {
         Self { config }
     }
 
+    /// Execute a shell command string via `sh -c`.
+    /// Used for manifest scripts (e.g. `"node build.js && echo done"`).
     pub fn execute(
         &self,
         command: &str,
         env: Option<HashMap<String, String>>,
     ) -> Result<(), ExecutorError> {
-        #[allow(unused_variables)]
-        let profile = self.config.profile;
+        warn_no_sandbox(self.config.profile);
 
+        let profile = self.config.profile;
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
 
@@ -58,6 +61,63 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    /// Execute a binary directly with individual arguments (no shell).
+    /// Used for `ara x` where arguments come from user input.
+    pub fn execute_program(
+        &self,
+        program: &Path,
+        args: &[String],
+        env: Option<HashMap<String, String>>,
+    ) -> Result<(), ExecutorError> {
+        warn_no_sandbox(self.config.profile);
+
+        let profile = self.config.profile;
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+
+        if let Some(env) = env {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        unsafe {
+            cmd.pre_exec(move || apply_seccomp(profile));
+        }
+
+        let mut child = cmd.spawn()?;
+        let status = child.wait()?;
+
+        if !status.success() {
+            return Err(ExecutorError::Io(std::io::Error::other(format!(
+                "command exited with: {status}"
+            ))));
+        }
+
+        Ok(())
+    }
+}
+
+/// Emit a warning when the sandbox is not active.
+fn warn_no_sandbox(profile: Profile) {
+    #[cfg(target_os = "linux")]
+    {
+        if profile == Profile::Open || profile == Profile::Custom {
+            eprintln!(
+                "  warning: running with {} profile — no syscall restrictions applied",
+                profile
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!(
+            "  warning: sandbox is not supported on this platform (Linux seccomp only); \
+             running without restrictions"
+        );
     }
 }
 

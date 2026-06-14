@@ -83,7 +83,7 @@ mod tests {
         // Known sha512- base64 SRI for "hello" (computed correctly)
         let actual_512 = compute_sha512(content);
         use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&actual_512);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(actual_512);
         let sri = format!("sha512-{b64}");
         assert!(verify_integrity(content, &sri));
     }

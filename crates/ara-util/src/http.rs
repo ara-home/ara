@@ -14,6 +14,8 @@ pub enum HttpError {
     StatusNotOk(reqwest::StatusCode),
     #[error("max retries exceeded")]
     MaxRetries,
+    #[error("plain HTTP is not allowed (set ARA_ALLOW_HTTP=1 to enable): {0}")]
+    InsecureUrl(String),
 }
 
 fn shared_client() -> Result<reqwest::Client, HttpError> {
@@ -65,6 +67,17 @@ impl HttpClient {
     }
 
     pub async fn get(&self, url: &str) -> Result<Vec<u8>, HttpError> {
+        if let Some(_rest) = url.strip_prefix("http://") {
+            let is_local = url.starts_with("http://localhost")
+                || url.starts_with("http://127.0.0.1")
+                || url.starts_with("http://[::1]");
+            if !is_local && std::env::var("ARA_ALLOW_HTTP").is_err() {
+                return Err(HttpError::InsecureUrl(url.to_owned()));
+            }
+            if !is_local {
+                eprintln!("  warning: fetching from insecure URL: {url}");
+            }
+        }
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRIES {

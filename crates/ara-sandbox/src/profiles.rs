@@ -1,3 +1,4 @@
+use std::fmt;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +12,17 @@ pub enum Profile {
 #[derive(Debug, thiserror::Error)]
 #[error("unknown profile: '{0}'")]
 pub struct UnknownProfile(pub String);
+
+impl fmt::Display for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Restricted => write!(f, "restricted"),
+            Self::Hermetic => write!(f, "hermetic"),
+            Self::Custom => write!(f, "custom"),
+        }
+    }
+}
 
 impl FromStr for Profile {
     type Err = UnknownProfile;
