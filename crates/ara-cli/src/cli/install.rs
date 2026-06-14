@@ -349,6 +349,31 @@ fn expand_workspace_members(
     entries
 }
 
+/// Returns `true` if `rel_path`, joined onto a base directory, would resolve to
+/// a location outside that base (path traversal). This performs the same
+/// containment check as normalizing `base.join(rel_path)` and verifying it
+/// stays under `base`, but without any heap allocation: it tracks the component
+/// depth relative to the base and rejects absolute paths or any `..` that would
+/// escape above the root.
+fn rel_path_escapes(rel_path: &str) -> bool {
+    let mut depth: i32 = 0;
+    for component in Path::new(rel_path).components() {
+        match component {
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::CurDir => {}
+            // An absolute path (root or prefix) would replace the base entirely.
+            Component::RootDir | Component::Prefix(_) => return true,
+            Component::Normal(_) => depth += 1,
+        }
+    }
+    false
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
     for component in path.components() {
@@ -497,15 +522,14 @@ pub fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) ->
 
     for (name, rel_path) in &bin_entries {
         let link = bin_dir.join(name);
-        let actual_file = pkg_dir.join(rel_path);
-        let normalized = normalize_path(&actual_file);
-        if !normalized.starts_with(pkg_dir) {
+        if rel_path_escapes(rel_path) {
             eprintln!(
                 "  warning: bin path '{}' escapes package directory, skipping {name}",
                 rel_path
             );
             continue;
         }
+        let actual_file = pkg_dir.join(rel_path);
 
         #[allow(unused_variables)]
         let target = format!("../{}/{}", pkg_name, rel_path);
