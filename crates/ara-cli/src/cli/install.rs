@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -336,6 +336,24 @@ fn expand_workspace_members(
     entries
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                components.pop();
+            }
+            Component::CurDir => {}
+            other => components.push(other.as_os_str().to_os_string()),
+        }
+    }
+    let mut result = PathBuf::new();
+    for c in components {
+        result.push(c);
+    }
+    result
+}
+
 pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
     // Pass 1: detect prefix without allocating file data
     let prefix = {
@@ -369,6 +387,9 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
     };
 
+    std::fs::create_dir_all(dest).context("failed to create extraction directory")?;
+    let canonical_dest = dest.canonicalize().context("failed to canonicalize dest")?;
+
     // Pass 2: extract streaming directly to disk
     let decoder = flate2::read::GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
@@ -388,6 +409,11 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         let target = dest.join(stripped);
+        let normalized = normalize_path(&target);
+        if !normalized.starts_with(&canonical_dest) {
+            anyhow::bail!("path traversal detected in tarball: {}", stripped.display());
+        }
+
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -435,9 +461,18 @@ pub fn install_bin_links(node_modules: &Path, pkg_name: &str, pkg_dir: &Path) ->
 
     for (name, rel_path) in &bin_entries {
         let link = bin_dir.join(name);
+        let actual_file = pkg_dir.join(rel_path);
+        let normalized = normalize_path(&actual_file);
+        if !normalized.starts_with(pkg_dir) {
+            eprintln!(
+                "  warning: bin path '{}' escapes package directory, skipping {name}",
+                rel_path
+            );
+            continue;
+        }
+
         #[allow(unused_variables)]
         let target = format!("../{}/{}", pkg_name, rel_path);
-        let actual_file = pkg_dir.join(rel_path);
 
         #[cfg(unix)]
         if let Ok(metadata) = std::fs::metadata(&actual_file) {
@@ -1349,7 +1384,7 @@ pub(crate) async fn cmd_install_specs(
                             risk_level: Some(result.risk_level.to_string()),
                         }),
                     )
-                } else if non_interactive || result.risk_level <= RiskLevel::Medium {
+                } else if result.risk_level <= RiskLevel::Medium {
                     let rl = result.risk_level;
                     print!(
                         "  ✓ {}@{} ({}) ⚠  {} finding(s) ({}) — auto-approved",
@@ -1365,6 +1400,30 @@ pub(crate) async fn cmd_install_specs(
                             risk_level: Some(rl.to_string()),
                         }),
                     )
+                } else if non_interactive {
+                    eprintln!(
+                        "  ⚠  {}@{} ({}) — {} finding(s) ({}) — bypassed in non-interactive mode",
+                        meta.name,
+                        ver_str,
+                        hash_str,
+                        result.findings.len(),
+                        result.risk_level
+                    );
+                    for finding in &result.findings {
+                        let loc = finding.location.as_deref().unwrap_or("<unknown>");
+                        eprintln!(
+                            "    ⚠  [{}] {} — {}",
+                            finding.severity, finding.pattern, loc
+                        );
+                        if !finding.description.is_empty() {
+                            eprintln!("         {}", finding.description);
+                        }
+                    }
+                    eprintln!(
+                        "  tip: re-run interactively to review or use --force to install anyway"
+                    );
+                    let _ = std::fs::remove_dir_all(&pkg_dir);
+                    (false, None)
                 } else {
                     match prompt_allow_package(&meta.name, &ver_str, &result.findings) {
                         AllowDecision::Yes | AllowDecision::Sandbox => {

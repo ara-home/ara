@@ -111,17 +111,26 @@ impl Store {
     pub fn get(&self, hash_str: &str) -> Result<Option<Vec<u8>>, StoreError> {
         validate_key(hash_str)?;
         let path = self.object_path(hash_str);
-        match std::fs::read(&path) {
-            Ok(data) => Ok(Some(data)),
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let legacy = self.base_path.join("objects").join(hash_str);
                 match std::fs::read(&legacy) {
-                    Ok(data) => Ok(Some(data)),
-                    Err(_) => Ok(None),
+                    Ok(data) => data,
+                    Err(_) => return Ok(None),
                 }
             }
-            Err(e) => Err(StoreError::Io(e)),
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        let actual_hash = hash::hex_encode(&hash::compute(&data));
+        let expected = hash_str.strip_prefix("sha256-").unwrap_or(hash_str);
+        if actual_hash != expected {
+            return Err(StoreError::IntegrityViolation {
+                expected: format!("sha256-{expected}"),
+                actual: format!("sha256-{actual_hash}"),
+            });
         }
+        Ok(Some(data))
     }
 
     #[must_use]
@@ -298,13 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_returns_tampered_data_without_check() {
+    fn test_get_rejects_tampered_data() {
         let (_dir, store) = setup();
         let hash = store.put(b"valid content").unwrap();
         let obj_path = store.object_path(&hash);
         std::fs::write(&obj_path, b"tampered").unwrap();
-        let result = store.get(&hash).unwrap();
-        assert_eq!(result, Some(b"tampered".to_vec()));
+        let result = store.get(&hash);
+        assert!(matches!(result, Err(StoreError::IntegrityViolation { .. })));
     }
 
     #[test]
