@@ -352,9 +352,7 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
                     if is_first {
                         common = comp.map(|c| c.as_os_str().to_os_string());
                         is_first = false;
-                    } else if common.is_some()
-                        && comp.map(|c| c.as_os_str()) != common.as_deref()
-                    {
+                    } else if common.is_some() && comp.map(|c| c.as_os_str()) != common.as_deref() {
                         common = None;
                     }
                     if path.components().count() > 1 {
@@ -1810,16 +1808,20 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
 
-    let tasks: Vec<_> = tasks.into_iter().map(|task| {
-        let pb = pb_resolve.clone();
-        async move {
-            let r = task.await;
-            pb.inc(1);
-            r
-        }
-    }).collect();
+    let tasks: Vec<_> = tasks
+        .into_iter()
+        .map(|task| {
+            let pb = pb_resolve.clone();
+            async move {
+                let r = task.await;
+                pb.inc(1);
+                r
+            }
+        })
+        .collect();
 
-    let results: Vec<_> = futures::future::join_all(tasks).await
+    let results: Vec<_> = futures::future::join_all(tasks)
+        .await
         .into_iter()
         .flatten()
         .collect();
