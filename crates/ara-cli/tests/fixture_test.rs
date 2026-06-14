@@ -565,10 +565,13 @@ fn test_install_transitive_deps() {
     let project_dir = tmp.path().join("project");
     copy_dir(&fixture_dir, &project_dir);
 
+    let store_home = tempfile::tempdir().expect("store home");
+
     let bin = ara_binary();
     let output = Command::new(&bin)
         .args(["install", "--non-interactive"])
         .current_dir(&project_dir)
+        .env("HOME", store_home.path())
         .env("ARA_NPM_REGISTRY", &registry_url)
         .output()
         .expect("ara install");
@@ -641,11 +644,13 @@ fn test_install_bin_links() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project_dir = tmp.path().join("project");
     copy_dir(&fixture_dir, &project_dir);
+    let store_home = tempfile::tempdir().expect("store home");
 
     let bin = ara_binary();
     let output = Command::new(&bin)
         .args(["install", "--non-interactive"])
         .current_dir(&project_dir)
+        .env("HOME", store_home.path())
         .env("ARA_NPM_REGISTRY", &registry_url)
         .output()
         .expect("ara install");
@@ -708,11 +713,13 @@ fn test_install_security_warning() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project_dir = tmp.path().join("project");
     copy_dir(&fixture_dir, &project_dir);
+    let store_home = tempfile::tempdir().expect("store home");
 
     let bin = ara_binary();
     let output = Command::new(&bin)
         .args(["install", "--non-interactive"])
         .current_dir(&project_dir)
+        .env("HOME", store_home.path())
         .env("ARA_NPM_REGISTRY", &registry_url)
         .output()
         .expect("ara install");

@@ -1940,9 +1940,9 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
     println!("Resolved {} packages", graph.nodes.len());
 
     // Warm up the connection pool to prevent the Thundering Herd
-    let default_url = std::env::var("ARA_NPM_REGISTRY")
+    let registry_url = std::env::var("ARA_NPM_REGISTRY")
         .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
-    if let Ok(reg) = ara_source::registry::RegistrySource::new(default_url) {
+    if let Ok(reg) = ara_source::registry::RegistrySource::new(registry_url.clone()) {
         let _ = reg.warmup().await;
     }
 
@@ -2078,6 +2078,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
         let store = store.clone();
         let store_index = Arc::clone(&store_index);
         let node_modules = node_modules.to_path_buf();
+        let registry_url = registry_url.clone();
 
         let cwd = cwd.to_path_buf();
         tasks.push(tokio::spawn(async move {
@@ -2151,7 +2152,20 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
                 Err(_) => return None,
             };
 
-            let cache_key = format!("{}@{}", node.name, ver_str);
+            // Include registry URL in cache key to avoid collisions
+            // between tarballs with the same name@version from different registries
+            let registry_part = match node.source {
+                SourceType::Npm | SourceType::Registry => {
+                    let url = dep.url.as_deref().unwrap_or(&registry_url);
+                    url.trim_end_matches('/')
+                }
+                _ => "",
+            };
+            let cache_key = if registry_part.is_empty() {
+                format!("{}@{}", node.name, ver_str)
+            } else {
+                format!("{}:{}@{}", registry_part, node.name, ver_str)
+            };
 
             let cached = store_index.lookup(&cache_key).ok().flatten();
 
