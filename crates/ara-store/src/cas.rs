@@ -104,8 +104,19 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
 
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(hash_str)
+        match std::fs::rename(&tmp_path, &path) {
+            Ok(()) => Ok(hash_str),
+            Err(e) => {
+                // rename can fail if another process created the file concurrently
+                let _ = std::fs::remove_file(&tmp_path);
+                if path.exists() {
+                    // same content (same hash), treat as success
+                    Ok(hash_str)
+                } else {
+                    Err(StoreError::Io(e))
+                }
+            }
+        }
     }
 
     pub fn get(&self, hash_str: &str) -> Result<Option<Vec<u8>>, StoreError> {

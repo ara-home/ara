@@ -48,6 +48,12 @@ pub fn parse(content: &str) -> Result<Lockfile, LockfileParseError> {
                 i, pkg.name
             )));
         }
+        if !pkg.package_hash.starts_with("sha256-") || pkg.package_hash.len() != 71 {
+            return Err(LockfileParseError::InvalidPackage(format!(
+                "package {} ({}): invalid package_hash format '{}' — expected sha256-<64 hex chars>",
+                i, pkg.name, pkg.package_hash
+            )));
+        }
     }
 
     Ok(lockfile)
@@ -71,7 +77,7 @@ mod tests {
             name = "zod"
             version = "3.23.8"
             source = "npm"
-            package_hash = "sha256:def"
+            package_hash = "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         "#;
         let lf = parse(src).unwrap();
         assert_eq!(lf.version, 1);
@@ -96,7 +102,7 @@ mod tests {
             name = "react"
             version = "18.3.0"
             source = "github"
-            package_hash = "sha256:xyz"
+            package_hash = "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         "#;
         let lf = parse(src).unwrap();
         assert_eq!(lf.graph.resolver, "mvs");
@@ -161,7 +167,7 @@ mod tests {
             name = ""
             version = "1.0.0"
             source = "npm"
-            package_hash = "sha256:abc"
+            package_hash = "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         "#;
         match parse(src) {
             Err(LockfileParseError::InvalidPackage(_)) => {}
@@ -201,7 +207,7 @@ mod tests {
             name = "foo"
             version = ""
             source = "npm"
-            package_hash = "sha256:abc"
+            package_hash = "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         "#;
         match parse(src) {
             Err(LockfileParseError::InvalidPackage(ref msg))
@@ -222,7 +228,7 @@ mod tests {
             name = "foo"
             version = "1.0.0"
             source = ""
-            package_hash = "sha256:abc"
+            package_hash = "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         "#;
         match parse(src) {
             Err(LockfileParseError::InvalidPackage(ref msg)) if msg.contains("source is empty") => {

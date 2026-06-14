@@ -82,7 +82,9 @@ mod tests {
                 name: "zod".to_string(),
                 version: "3.23.8".to_string(),
                 source: "npm".to_string(),
-                package_hash: "sha256:def".to_string(),
+                package_hash:
+                    "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        .to_string(),
                 integrity: None,
                 signature: None,
                 repository: None,
@@ -116,8 +118,10 @@ mod tests {
                 name: "react".to_string(),
                 version: "18.3.0".to_string(),
                 source: "github".to_string(),
-                package_hash: "sha256:xyz".to_string(),
-                integrity: Some("sha256:xyz".to_string()),
+                package_hash:
+                    "sha256-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        .to_string(),
+                integrity: Some("sha256-xyz".to_string()),
                 signature: None,
                 repository: Some("facebook/react".to_string()),
                 commit: Some("abc123".to_string()),

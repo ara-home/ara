@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::SourceError;
 use ara_types::{Constraint, PackageIdentity, Version};
+use ara_util::hash;
 use ara_util::http::{HttpClient, HttpError};
 
 const CACHE_TTL: Duration = Duration::from_secs(604800); // 7 days
@@ -75,6 +76,12 @@ impl RegistrySource {
         Some(dir.join(format!("{safe_name}.json")))
     }
 
+    fn cache_integrity_path(name: &str) -> Option<PathBuf> {
+        let dir = Self::cache_dir()?;
+        let safe_name = name.replace('/', "_").replace('@', "");
+        Some(dir.join(format!("{safe_name}.json.sha256")))
+    }
+
     fn read_cached_metadata(name: &str) -> Option<serde_json::Value> {
         let path = Self::cache_path(name)?;
         if !path.exists() {
@@ -89,9 +96,27 @@ impl RegistrySource {
                 }
             }
         }
-        let file = std::fs::File::open(path).ok()?;
+        let file = std::fs::File::open(&path).ok()?;
         let reader = std::io::BufReader::new(file);
         let parsed: serde_json::Value = serde_json::from_reader(reader).ok()?;
+
+        // Verify integrity if sidecar file exists
+        let integrity_ok = Self::cache_integrity_path(name).and_then(|hash_path| {
+            let expected = std::fs::read_to_string(&hash_path).ok()?;
+            let content = serde_json::to_string(&parsed).ok()?;
+            let actual = hash::hex_encode(&hash::compute(content.as_bytes()));
+            if actual == expected.trim() {
+                Some(())
+            } else {
+                None
+            }
+        });
+        if integrity_ok.is_none() {
+            // No integrity file or mismatch — invalidate cache
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+
         // Support legacy format: unwrap {"body": metadata} wrapper
         if parsed.get("body").and_then(|b| b.get("versions")).is_some() {
             parsed.get("body").cloned()
@@ -109,7 +134,12 @@ impl RegistrySource {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(content) = serde_json::to_string(body) {
-            let _ = std::fs::write(&path, content);
+            let _ = std::fs::write(&path, &content);
+            // Write integrity sidecar
+            if let Some(hash_path) = Self::cache_integrity_path(name) {
+                let h = hash::hex_encode(&hash::compute(content.as_bytes()));
+                let _ = std::fs::write(&hash_path, &h);
+            }
         }
     }
 
@@ -199,6 +229,24 @@ impl RegistrySource {
             HttpError::StatusNotOk(reqwest::StatusCode::NOT_FOUND) => SourceError::VersionNotFound,
             _ => SourceError::NetworkError(e.to_string()),
         })?;
+
+        if let Some(ref expected) = identity.content_hash {
+            if !ara_util::hash::verify_integrity(&body, expected) {
+                let actual = ara_util::hash::format_sha256(&body);
+                // Also try shasum (plain hex) comparison
+                let expected_hex = expected.trim();
+                if expected_hex.len() == 64
+                    && ara_util::hash::hex_encode(&ara_util::hash::compute(&body)) == expected_hex
+                {
+                    return Ok(body);
+                }
+                return Err(SourceError::IntegrityMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
+
         Ok(body)
     }
 

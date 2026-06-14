@@ -234,6 +234,7 @@ dependencies = [
 name = "ara-util"
 version = "0.11.0"
 dependencies = [
+ "base64",
  "hex",
  "mockito",
  "reqwest",

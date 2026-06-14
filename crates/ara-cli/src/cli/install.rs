@@ -542,12 +542,14 @@ fn collect_installed_names(node_modules: &Path) -> Vec<String> {
 }
 
 /// Extract and sort all version strings from package metadata.
-/// Compact extracted metadata: only versions + dependency maps,
+/// Compact extracted metadata: only versions + dependency maps + integrity,
 /// avoids storing the full npm registry response (30MB+ for next.js).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PackageMeta {
     versions: Vec<String>,
     deps: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    integrity: HashMap<String, String>,
 }
 
 fn registry_cache_dir() -> Option<PathBuf> {
@@ -600,7 +602,7 @@ fn write_package_meta(name: &str, meta: &PackageMeta) {
     let _ = serde_json::to_writer(writer, meta);
 }
 
-/// Extract sorted versions + dependency map from full npm metadata JSON.
+/// Extract sorted versions + dependency map + integrity from full npm metadata JSON.
 fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
     let versions_map = meta["versions"].as_object().cloned().unwrap_or_default();
     let mut versions: Vec<String> = versions_map.keys().cloned().collect();
@@ -613,7 +615,8 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
         }
     });
     let mut deps: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for (ver_str, ver_data) in versions_map {
+    let mut integrity: HashMap<String, String> = HashMap::new();
+    for (ver_str, ver_data) in &versions_map {
         let mut deps_map = HashMap::new();
         if let Some(dep_map) = ver_data["dependencies"].as_object() {
             for (k, v) in dep_map {
@@ -632,8 +635,21 @@ fn extract_package_meta(meta: &serde_json::Value) -> PackageMeta {
         if !deps_map.is_empty() {
             deps.insert(ver_str.clone(), deps_map);
         }
+        // Extract integrity hash from dist metadata (npm registry)
+        let dist = &ver_data["dist"];
+        let hash = dist["integrity"]
+            .as_str()
+            .or_else(|| dist["shasum"].as_str())
+            .map(|s| s.to_string());
+        if let Some(h) = hash {
+            integrity.insert(ver_str.clone(), h);
+        }
     }
-    PackageMeta { versions, deps }
+    PackageMeta {
+        versions,
+        deps,
+        integrity,
+    }
 }
 
 async fn install_transitive_deps(
@@ -881,6 +897,17 @@ async fn install_transitive_deps(
     let nm = node_modules;
     let cache_hits_ref = Arc::clone(&cache_hits);
     let mut tasks = Vec::new();
+    // Pre-compute content hashes from metadata for integrity verification
+    let content_hashes: HashMap<String, Option<String>> = resolution
+        .iter()
+        .map(|(name, ver)| {
+            let hash = meta_cache
+                .get(name)
+                .and_then(|pm| pm.integrity.get(ver))
+                .cloned();
+            (name.clone(), hash)
+        })
+        .collect();
     for (dep_name, exact_ver) in &resolution {
         if initial_pkgs.contains(dep_name) {
             continue;
@@ -905,6 +932,7 @@ async fn install_transitive_deps(
         let reg_ref = reg.clone();
         let store_ref = store.clone();
         let nm = nm.to_path_buf();
+        let content_hash = content_hashes.get(&dep_name).and_then(|h| h.clone());
 
         tasks.push(tokio::spawn(async move {
             let dep_dir = nm.join(&dep_name);
@@ -924,7 +952,7 @@ async fn install_transitive_deps(
                 source: SourceType::Npm,
                 name: dep_name.clone(),
                 version: parsed_ver.clone(),
-                content_hash: None,
+                content_hash,
                 requested_ref: None,
             };
 
@@ -1519,6 +1547,7 @@ struct ResolvedMeta {
     url: Option<String>,
     repo: Option<String>,
     commit: Option<String>,
+    integrity: Option<String>,
 }
 
 /// Fetch content for a resolved meta, returning raw bytes.
@@ -1532,7 +1561,7 @@ async fn fetch_meta_content(meta: &ResolvedMeta) -> Result<Vec<u8>> {
                 source: SourceType::Npm,
                 name: meta.name.clone(),
                 version: meta.version_semver.clone(),
-                content_hash: None,
+                content_hash: meta.integrity.clone(),
                 requested_ref: None,
             };
             reg.fetch(&identity)
@@ -1626,6 +1655,16 @@ async fn resolve_npm_meta(
     let parsed_ver = Version::parse(&resolved_ver_str)
         .with_context(|| format!("invalid version from registry: {resolved_ver_str}"))?;
 
+    // Fetch metadata to extract integrity hash for the resolved version
+    let integrity = reg.fetch_metadata(name).await.ok().and_then(|meta| {
+        let ver_data = meta["versions"][&resolved_ver_str].as_object()?;
+        let dist = ver_data.get("dist")?;
+        dist["integrity"]
+            .as_str()
+            .or_else(|| dist["shasum"].as_str())
+            .map(|s| s.to_string())
+    });
+
     Ok(ResolvedMeta {
         name: name.to_string(),
         version: manifest_ver,
@@ -1635,6 +1674,7 @@ async fn resolve_npm_meta(
         url: None,
         repo: None,
         commit: None,
+        integrity,
     })
 }
 
@@ -1649,6 +1689,7 @@ fn resolve_github_meta(repo: &str, commit: Option<&str>) -> Result<ResolvedMeta>
         url: None,
         repo: Some(repo.to_string()),
         commit: commit.map(|c| c.to_string()),
+        integrity: None,
     })
 }
 
@@ -1665,6 +1706,7 @@ fn resolve_git_meta(url: &str, commit: Option<&str>) -> Result<ResolvedMeta> {
         url: Some(url.to_string()),
         repo: None,
         commit: Some(commit_str),
+        integrity: None,
     })
 }
 
@@ -1679,6 +1721,7 @@ fn resolve_tarball_meta(url: &str) -> Result<ResolvedMeta> {
         url: Some(url.to_string()),
         repo: None,
         commit: None,
+        integrity: None,
     })
 }
 
