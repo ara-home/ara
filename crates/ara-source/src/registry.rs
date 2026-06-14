@@ -17,6 +17,19 @@ pub struct RegistrySource {
     client: HttpClient,
 }
 
+fn sanitize_cache_name(name: &str) -> String {
+    let name = name.replace('/', "_").replace('@', "");
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+}
+
 impl RegistrySource {
     pub fn new(registry_url: String) -> Result<Self, SourceError> {
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
@@ -72,13 +85,13 @@ impl RegistrySource {
 
     fn cache_path(name: &str) -> Option<PathBuf> {
         let dir = Self::cache_dir()?;
-        let safe_name = name.replace('/', "_").replace('@', "");
+        let safe_name = sanitize_cache_name(name);
         Some(dir.join(format!("{safe_name}.json")))
     }
 
     fn cache_integrity_path(name: &str) -> Option<PathBuf> {
         let dir = Self::cache_dir()?;
-        let safe_name = name.replace('/', "_").replace('@', "");
+        let safe_name = sanitize_cache_name(name);
         Some(dir.join(format!("{safe_name}.json.sha256")))
     }
 

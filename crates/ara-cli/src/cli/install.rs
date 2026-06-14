@@ -274,6 +274,8 @@ fn expand_workspace_members(
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
 
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+
     for pattern in &workspace.members {
         let full_pattern = cwd.join(pattern);
         let full_str = full_pattern.to_string_lossy().to_string();
@@ -297,6 +299,17 @@ fn expand_workspace_members(
 
             if !entry.is_dir() {
                 continue;
+            }
+
+            // Reject path traversal: verify resolved entry is within workspace root
+            if let Ok(canonical_entry) = entry.canonicalize() {
+                if !canonical_entry.starts_with(&canonical_cwd) {
+                    eprintln!(
+                        "  warning: workspace member {} escapes workspace root, skipping",
+                        entry.display()
+                    );
+                    continue;
+                }
             }
 
             let manifest = match read_member_manifest(&entry) {
@@ -419,6 +432,29 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         entry.unpack(&target).context("failed to unpack entry")?;
+
+        // Strip dangerous permissions: remove setuid/setgid/sticky bits
+        // and world-writable, keep owner/group/other read/write/execute as-is
+        if let Ok(metadata) = std::fs::metadata(&target) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                const CLEAN_MASK: u32 = 0o7777 & !(0o7000 | 0o0002);
+                let mode = metadata.permissions().mode();
+                let cleaned = mode & CLEAN_MASK;
+                if mode != cleaned {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(cleaned);
+                    let _ = std::fs::set_permissions(&target, perms);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut perms = metadata.permissions();
+                perms.set_readonly(!perms.readonly());
+                let _ = std::fs::set_permissions(&target, perms);
+            }
+        }
     }
 
     Ok(())
@@ -562,9 +598,22 @@ fn registry_cache_dir() -> Option<PathBuf> {
     )
 }
 
+fn safe_cache_name(name: &str) -> String {
+    let name = name.replace('/', "_").replace('@', "");
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn read_package_meta(name: &str) -> Option<PackageMeta> {
     let dir = registry_cache_dir()?;
-    let safe_name = name.replace('/', "_").replace('@', "");
+    let safe_name = safe_cache_name(name);
     let path = dir.join(format!("{safe_name}.json"));
     if !path.exists() {
         return None;
@@ -588,7 +637,7 @@ fn write_package_meta(name: &str, meta: &PackageMeta) {
         Some(d) => d,
         None => return,
     };
-    let safe_name = name.replace('/', "_").replace('@', "");
+    let safe_name = safe_cache_name(name);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("  warning: failed to create registry cache dir: {e}");
         return;
@@ -1118,12 +1167,13 @@ async fn install_transitive_deps(
     }
 
     for (dep_name, short_ver, hash_str) in &results {
+        let integrity = content_hashes.get(dep_name).and_then(|h| h.clone());
         pkg_entries.push(PackageEntry {
             name: dep_name.clone(),
             version: short_ver.clone(),
             source: "npm".to_string(),
             package_hash: hash_str.clone(),
-            integrity: None,
+            integrity,
             signature: None,
             repository: None,
             commit: None,
@@ -1497,7 +1547,7 @@ pub(crate) async fn cmd_install_specs(
             version: ver_str.clone(),
             source: meta.source_type.to_string(),
             package_hash: hash_str.clone(),
-            integrity: None,
+            integrity: meta.integrity.clone(),
             signature: None,
             repository: meta.repo.clone(),
             commit: meta.commit.clone(),

@@ -20,6 +20,7 @@ impl TarballSource {
     }
 
     pub async fn fetch(&self, _identity: &PackageIdentity) -> Result<Vec<u8>, SourceError> {
+        validate_tarball_url(&self.url)?;
         let client = HttpClient::new().map_err(|e| SourceError::NetworkError(e.to_string()))?;
         let body = client
             .get(&self.url)
@@ -27,6 +28,18 @@ impl TarballSource {
             .map_err(|e| SourceError::NetworkError(e.to_string()))?;
         Ok(body)
     }
+}
+
+/// Validate that a tarball URL uses an allowed scheme.
+/// Only `https://` schemes are allowed; local paths (no scheme) are accepted.
+/// Rejects `file://`, `ftp://`, and other non-HTTPS schemes.
+fn validate_tarball_url(url: &str) -> Result<(), SourceError> {
+    if url.contains("://") && !url.starts_with("https://") {
+        return Err(SourceError::NetworkError(format!(
+            "tarball URL must use HTTPS: {url}"
+        )));
+    }
+    Ok(())
 }
 
 /// Extract the package name and version from a gzipped tarball's `package.json`.
@@ -254,5 +267,28 @@ mod tests {
     fn test_name_from_url_no_extension() {
         let result = name_from_url("https://example.com/package");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_tarball_url_https_ok() {
+        assert!(validate_tarball_url("https://example.com/pkg.tgz").is_ok());
+    }
+
+    #[test]
+    fn test_validate_tarball_url_local_path_ok() {
+        assert!(validate_tarball_url("./downloads/pkg.tgz").is_ok());
+        assert!(validate_tarball_url("/tmp/pkg.tgz").is_ok());
+    }
+
+    #[test]
+    fn test_validate_tarball_url_rejects_file() {
+        let err = validate_tarball_url("file:///etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_tarball_url_rejects_http() {
+        let err = validate_tarball_url("http://example.com/pkg.tgz").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"));
     }
 }
