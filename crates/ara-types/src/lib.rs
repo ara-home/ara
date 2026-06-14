@@ -137,8 +137,8 @@ fn normalize_operators(s: &str) -> String {
                 i += 1;
             }
         } else if i + 1 < s.len()
-            && ((bytes[i] == b'>' && bytes[i + 1] == b'=')
-                || (bytes[i] == b'<' && bytes[i + 1] == b'='))
+            && (bytes[i] == b'<' || bytes[i] == b'>')
+            && bytes[i + 1] == b'='
         {
             out.push(bytes[i] as char);
             out.push(bytes[i + 1] as char);
