@@ -3065,8 +3065,6 @@ require_review = true
     async fn test_cmd_install_unicode_name() {
         let root = tempfile::tempdir().unwrap();
 
-        let cwd = root.path().to_path_buf();
-
         let pkg_json = r#"{"name": "unicode-test", "version": "1.0.0"}"#;
         std::fs::write(root.path().join("package.json"), pkg_json).unwrap();
 

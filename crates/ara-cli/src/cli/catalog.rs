@@ -9,8 +9,12 @@ type CatalogsMap = HashMap<String, HashMap<String, String>>;
 /// Show workspace catalog entries.
 pub fn cmd_catalog_list() -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
+    list_catalog_from(&cwd)
+}
+
+fn list_catalog_from(cwd: &Path) -> Result<()> {
     let (catalog, catalogs): (Option<CatalogMap>, Option<CatalogsMap>) =
-        read_catalog_from_manifest(&cwd)?;
+        read_catalog_from_manifest(cwd)?;
 
     if let Some(ref cat) = catalog {
         if cat.is_empty() {
@@ -41,9 +45,13 @@ pub fn cmd_catalog_list() -> Result<()> {
     Ok(())
 }
 
-/// Add an entry to the default workspace catalog.
+/// Add an entry to the default workspace catalog (CLI entry point).
 pub fn cmd_catalog_add(name: &str, version: &str) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
+    add_catalog_entry(&cwd, name, version)
+}
+
+fn add_catalog_entry(cwd: &Path, name: &str, version: &str) -> Result<()> {
     let manifest_path = cwd.join("ara.toml");
 
     let content = if manifest_path.exists() {
@@ -155,9 +163,7 @@ mod tests {
     #[test]
     fn test_cmd_catalog_add_creates_section() {
         let root = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(root.path()).unwrap();
-
-        cmd_catalog_add("react", "^19.0.0").unwrap();
+        add_catalog_entry(root.path(), "react", "^19.0.0").unwrap();
 
         let content = std::fs::read_to_string(root.path().join("ara.toml")).unwrap();
         assert!(content.contains("[workspace.catalog]"));
@@ -167,17 +173,19 @@ mod tests {
     #[test]
     fn test_cmd_catalog_add_updates_existing() {
         let root = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(root.path()).unwrap();
 
-        let initial = r#"[workspace]
+        std::fs::write(
+            root.path().join("ara.toml"),
+            r#"[workspace]
 members = ["packages/*"]
 
 [workspace.catalog]
 react = "^18.0.0"
-"#;
-        std::fs::write(root.path().join("ara.toml"), initial).unwrap();
+"#,
+        )
+        .unwrap();
 
-        cmd_catalog_add("react", "^19.0.0").unwrap();
+        add_catalog_entry(root.path(), "react", "^19.0.0").unwrap();
 
         let content = std::fs::read_to_string(root.path().join("ara.toml")).unwrap();
         assert!(content.contains("react = \"^19.0.0\""));
@@ -187,17 +195,19 @@ react = "^18.0.0"
     #[test]
     fn test_cmd_catalog_add_appends_to_existing_section() {
         let root = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(root.path()).unwrap();
 
-        let initial = r#"[workspace]
+        std::fs::write(
+            root.path().join("ara.toml"),
+            r#"[workspace]
 members = ["packages/*"]
 
 [workspace.catalog]
 react = "^19.0.0"
-"#;
-        std::fs::write(root.path().join("ara.toml"), initial).unwrap();
+"#,
+        )
+        .unwrap();
 
-        cmd_catalog_add("react-dom", "^19.0.0").unwrap();
+        add_catalog_entry(root.path(), "react-dom", "^19.0.0").unwrap();
 
         let content = std::fs::read_to_string(root.path().join("ara.toml")).unwrap();
         assert!(content.contains("react-dom = \"^19.0.0\""));
@@ -279,6 +289,7 @@ vitest = "^2.0.0"
 
         let (catalog, catalogs) = read_catalog_from_manifest(root.path()).unwrap();
         assert!(catalog.is_some());
+        assert!(catalogs.is_none(), "no named catalogs in this fixture");
         let cat = catalog.unwrap();
         assert_eq!(cat.get("react").unwrap(), "^19.0.0");
     }
