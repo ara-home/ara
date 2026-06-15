@@ -32,6 +32,34 @@ pub struct DependencyEntry {
     pub path: Option<String>,
 }
 
+impl DependencyEntry {
+    #[must_use]
+    pub fn is_catalog_ref(&self) -> bool {
+        self.version
+            .as_deref()
+            .is_some_and(|v| v == "catalog:" || v.starts_with("catalog:"))
+    }
+
+    #[must_use]
+    pub fn catalog_ref(&self) -> Option<ara_types::CatalogRef> {
+        let v = self.version.as_deref()?;
+        if v == "catalog:" {
+            return Some(ara_types::CatalogRef {
+                catalog_name: String::new(),
+                package_name: self.name.clone(),
+            });
+        }
+        let rest = v.strip_prefix("catalog:")?;
+        if rest.is_empty() || rest.contains(':') {
+            return None;
+        }
+        Some(ara_types::CatalogRef {
+            catalog_name: rest.to_string(),
+            package_name: self.name.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub members: Vec<String>,
