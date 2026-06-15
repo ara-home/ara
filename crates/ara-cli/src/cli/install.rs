@@ -2777,6 +2777,8 @@ version = "0.1.0"
 
         let ws = ara_manifest::types::Workspace {
             members: vec!["packages/*".to_string()],
+            catalog: None,
+            catalogs: None,
         };
         let entries = expand_workspace_members(&ws, root.path());
         assert_eq!(entries.len(), 500);
@@ -2842,6 +2844,8 @@ require_review = true
 
         let ws = ara_manifest::types::Workspace {
             members: vec!["packages/*".to_string()],
+            catalog: None,
+            catalogs: None,
         };
         let entries = expand_workspace_members(&ws, root.path());
         assert_eq!(entries.len(), 1);

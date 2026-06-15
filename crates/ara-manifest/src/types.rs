@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +35,8 @@ pub struct DependencyEntry {
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub members: Vec<String>,
+    pub catalog: Option<HashMap<String, String>>,
+    pub catalogs: Option<HashMap<String, HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +76,21 @@ pub struct Manifest {
     pub build: Option<Build>,
     #[allow(dead_code)]
     pub package_json_extras: Option<String>,
+}
+
+impl Manifest {
+    #[must_use]
+    pub fn catalog(&self) -> Option<&std::collections::HashMap<String, String>> {
+        self.workspace.as_ref().and_then(|w| w.catalog.as_ref())
+    }
+
+    #[must_use]
+    pub fn named_catalog(&self, name: &str) -> Option<&std::collections::HashMap<String, String>> {
+        self.workspace
+            .as_ref()
+            .and_then(|w| w.catalogs.as_ref())
+            .and_then(|c| c.get(name))
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +144,8 @@ mod tests {
             }],
             workspace: Some(Workspace {
                 members: vec!["apps/*".into()],
+                catalog: None,
+                catalogs: None,
             }),
             scripts: vec![ScriptEntry {
                 name: "build".into(),
