@@ -1,4 +1,26 @@
 
+## [0.13.0] - 2026-06-15
+
+### 🚀 Features
+
+- Add workspace catalog support and related CLI commands (#59)
+
+### 🐛 Bug Fixes
+
+- *(cli)* Isolate store per test run and scope cache key with registry URL (#47)
+
+### 💼 Other
+
+- Add instructions for AI agents (#46)
+- Bump to v0.13.0
+
+### 🚜 Refactor
+
+- Split install.rs (#60)
+
+### 📚 Documentation
+
+- Update CHANGELOG.md (#41)
 ## [0.12.0] - 2026-06-14
 
 ### 🚀 Features
