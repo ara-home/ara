@@ -43,6 +43,7 @@ pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
         false,
         true,  // non-interactive
         false, // package-lock
+        false, // catalog
     )
     .await;
 

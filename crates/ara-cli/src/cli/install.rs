@@ -1243,6 +1243,7 @@ pub(crate) async fn cmd_install_specs(
     offline: bool,
     non_interactive: bool,
     package_lock: bool,
+    catalog: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
@@ -1318,6 +1319,51 @@ pub(crate) async fn cmd_install_specs(
 
     let mut installed_names: Vec<String> = Vec::new();
     for spec in specs {
+        if catalog {
+            // Catalog mode: add a catalog reference without fetching
+            let name = {
+                let s = spec.trim();
+                if let Some(at_pos) = s.find('@') {
+                    s[..at_pos].to_string()
+                } else if let Some(colon_pos) = s.find(':') {
+                    s[..colon_pos].to_string()
+                } else {
+                    s.to_string()
+                }
+            };
+            let catalog_version = {
+                let s = spec.trim();
+                if let Some(at_pos) = s.find('@') {
+                    let after = &s[at_pos + 1..];
+                    if after.is_empty() {
+                        "catalog:".to_string()
+                    } else {
+                        format!("catalog:{after}")
+                    }
+                } else {
+                    "catalog:".to_string()
+                }
+            };
+
+            if let Some(pos) = m.deps.iter().position(|d| d.name == name) {
+                m.deps.remove(pos);
+            }
+
+            println!("  catalog: {name} -> {catalog_version}");
+            m.deps.push(ara_manifest::types::DependencyEntry {
+                name,
+                source: "npm".to_string(),
+                kind: dep_kind.clone(),
+                version: Some(catalog_version),
+                repo: None,
+                url: None,
+                commit: None,
+                path: None,
+            });
+
+            continue;
+        }
+
         let target = ara_source::url::parse_install_spec(spec)
             .with_context(|| format!("failed to parse spec: {spec}"))?;
 
@@ -3034,6 +3080,7 @@ require_review = true
             false,
             false,
             true,
+            false,
             false,
         )
         .await;

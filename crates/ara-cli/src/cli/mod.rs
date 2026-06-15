@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod analyze;
+mod catalog;
 mod gc;
 pub mod install;
 mod prompt;
@@ -47,6 +48,9 @@ pub enum Commands {
         /// Generate package-lock.json (temporary compat for deploy platforms)
         #[arg(long)]
         package_lock: bool,
+        /// Add as catalog reference instead of resolving now
+        #[arg(long)]
+        catalog: bool,
     },
     /// Add project dependencies
     Add {
@@ -79,6 +83,14 @@ pub enum Commands {
         /// Generate package-lock.json (temporary compat for deploy platforms)
         #[arg(long)]
         package_lock: bool,
+        /// Add as catalog reference instead of resolving now
+        #[arg(long)]
+        catalog: bool,
+    },
+    /// Manage workspace catalog
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommands,
     },
     /// Execute a package binary (like npx or pnpm dlx)
     X {
@@ -121,6 +133,19 @@ pub enum Commands {
     Trust { package: String },
 }
 
+#[derive(Subcommand)]
+pub enum CatalogCommands {
+    /// List all catalog entries
+    List,
+    /// Add an entry to the default workspace catalog
+    Add {
+        /// Package name
+        name: String,
+        /// Version constraint (e.g. "^19.0.0")
+        version: String,
+    },
+}
+
 impl Cli {
     pub async fn run(&self) -> Result<()> {
         match &self.command {
@@ -135,6 +160,7 @@ impl Cli {
                 offline,
                 non_interactive,
                 package_lock,
+                catalog,
             } => {
                 if !deps.is_empty() {
                     install::cmd_install_specs(
@@ -148,6 +174,7 @@ impl Cli {
                         *offline,
                         *non_interactive,
                         *package_lock,
+                        *catalog,
                     )
                     .await
                 } else {
@@ -165,6 +192,7 @@ impl Cli {
                 offline,
                 non_interactive,
                 package_lock,
+                catalog,
             } => {
                 install::cmd_install_specs(
                     deps,
@@ -177,6 +205,7 @@ impl Cli {
                     *offline,
                     *non_interactive,
                     *package_lock,
+                    *catalog,
                 )
                 .await
             }
@@ -204,6 +233,10 @@ impl Cli {
                     gc::cmd_gc()
                 }
             }
+            Commands::Catalog { command } => match command {
+                CatalogCommands::List => catalog::cmd_catalog_list(),
+                CatalogCommands::Add { name, version } => catalog::cmd_catalog_add(name, version),
+            },
             Commands::Trust { package: _ } => {
                 eprintln!("ara trust: not yet implemented");
                 Ok(())
