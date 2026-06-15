@@ -741,6 +741,246 @@ fn test_install_security_warning() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Catalog fixture tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_catalog_install_member_deps() {
+    let _r = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    let _react = mock_npm_package(&mut server, "react", "^19.0.0");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let packages_dir = project_dir.join("packages");
+    let member_dir = packages_dir.join("web");
+    std::fs::create_dir_all(&member_dir).expect("create member dir");
+
+    // Root with catalog + workspace
+    let root_manifest = r#"[project]
+name = "monorepo"
+version = "1.0.0"
+
+[workspace]
+members = ["packages/*"]
+
+[workspace.catalog]
+react = "^19.0.0"
+"#;
+    std::fs::write(project_dir.join("ara.toml"), root_manifest).unwrap();
+
+    // Member using catalog:
+    let member_json = r#"{
+        "name": "web",
+        "version": "0.1.0",
+        "dependencies": {
+            "react": "catalog:"
+        }
+    }"#;
+    std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+    let store_home = tempfile::tempdir().expect("store home");
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("HOME", store_home.path())
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    assert!(
+        output.status.success(),
+        "install failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify lockfile has react with resolved version
+    let lockfile_path = project_dir.join("ara.lock");
+    assert!(lockfile_path.exists(), "ara.lock not created");
+    let lock_content = std::fs::read_to_string(&lockfile_path).unwrap();
+    let lf = ara_lockfile::parser::parse(&lock_content).unwrap();
+
+    let react_pkg = lf.packages.iter().find(|p| p.name == "react");
+    assert!(react_pkg.is_some(), "react missing from lockfile");
+    assert_eq!(react_pkg.unwrap().version, "19.0.0");
+
+    // Verify lockfile contains workspace catalog
+    assert!(
+        lf.workspace.is_some(),
+        "lockfile should contain workspace catalog"
+    );
+    let ws = lf.workspace.as_ref().unwrap();
+    assert!(ws.catalog.is_some(), "workspace should have catalog");
+    let cat = ws.catalog.as_ref().unwrap();
+    assert_eq!(cat.get("react").unwrap(), "^19.0.0");
+}
+
+#[test]
+fn test_catalog_install_root_deps() {
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    let _react = mock_npm_package(&mut server, "react", "19.0.0");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let root_manifest = r#"[project]
+name = "my-app"
+version = "1.0.0"
+
+[workspace.catalog]
+react = "^19.0.0"
+
+[deps]
+react = { source = "npm", version = "catalog:" }
+"#;
+    std::fs::write(project_dir.join("ara.toml"), root_manifest).unwrap();
+
+    let store_home = tempfile::tempdir().expect("store home");
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("HOME", store_home.path())
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "install failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let lockfile_path = project_dir.join("ara.lock");
+    assert!(lockfile_path.exists(), "ara.lock not created");
+    let lock_content = std::fs::read_to_string(&lockfile_path).unwrap();
+    let lf = ara_lockfile::parser::parse(&lock_content).unwrap();
+
+    let react_pkg = lf.packages.iter().find(|p| p.name == "react");
+    assert!(react_pkg.is_some(), "react missing from lockfile");
+    assert_eq!(react_pkg.unwrap().version, "19.0.0");
+}
+
+#[test]
+fn test_catalog_install_override_warning() {
+    let mut server = mockito::Server::new();
+    let registry_url = server.url();
+    server.mock("GET", "/favicon.ico").with_status(404).create();
+
+    let _react = mock_npm_package(&mut server, "react", "18.3.0");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let root_manifest = r#"[project]
+name = "my-app"
+version = "1.0.0"
+
+[workspace.catalog]
+react = "^19.0.0"
+
+[deps]
+react = { source = "npm", version = "^18.3.0" }
+"#;
+    std::fs::write(project_dir.join("ara.toml"), root_manifest).unwrap();
+
+    let store_home = tempfile::tempdir().expect("store home");
+
+    let bin = ara_binary();
+    let output = Command::new(&bin)
+        .args(["install", "--non-interactive"])
+        .current_dir(&project_dir)
+        .env("HOME", store_home.path())
+        .env("ARA_NPM_REGISTRY", &registry_url)
+        .output()
+        .expect("ara install");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "install should succeed despite override\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let all_output = format!("{stdout}\n{stderr}");
+    assert!(
+        all_output.to_lowercase().contains("warning")
+            && all_output.to_lowercase().contains("override"),
+        "expected override warning in output:\n{all_output}"
+    );
+
+    let lockfile_path = project_dir.join("ara.lock");
+    assert!(lockfile_path.exists(), "ara.lock not created");
+    let lock_content = std::fs::read_to_string(&lockfile_path).unwrap();
+    let lf = ara_lockfile::parser::parse(&lock_content).unwrap();
+
+    let react_pkg = lf.packages.iter().find(|p| p.name == "react").unwrap();
+    assert_eq!(react_pkg.version, "18.3.0");
+}
+
+// ---------------------------------------------------------------------------
+// Catalog CLI command tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_catalog_cli_add_and_list() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).expect("create dir");
+
+    let bin = ara_binary();
+
+    // ara catalog add react ^19.0.0
+    let add_output = Command::new(&bin)
+        .args(["catalog", "add", "react", "^19.0.0"])
+        .current_dir(&project_dir)
+        .output()
+        .expect("ara catalog add");
+
+    assert!(
+        add_output.status.success(),
+        "catalog add failed:\n{}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    // Verify ara.toml was created
+    let manifest_content =
+        std::fs::read_to_string(project_dir.join("ara.toml")).expect("read ara.toml");
+    assert!(manifest_content.contains("react = \"^19.0.0\""));
+
+    // ara catalog list
+    let list_output = Command::new(&bin)
+        .args(["catalog", "list"])
+        .current_dir(&project_dir)
+        .output()
+        .expect("ara catalog list");
+
+    assert!(
+        list_output.status.success(),
+        "catalog list failed:\n{}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+
+    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(list_stdout.contains("react"));
+    assert!(list_stdout.contains("^19.0.0"));
+}
+
 fn print_summary(results: &[FixtureResult]) {
     let passed = results.iter().filter(|r| r.passed).count();
     let failed = results.len() - passed;

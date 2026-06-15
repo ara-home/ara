@@ -48,7 +48,13 @@ pub fn parse(content: &str) -> Result<Lockfile, LockfileParseError> {
                 i, pkg.name
             )));
         }
-        if !pkg.package_hash.starts_with("sha256-") || pkg.package_hash.len() != 71 {
+        if !pkg.package_hash.starts_with("sha256-") && !pkg.package_hash.starts_with("workspace:") {
+            return Err(LockfileParseError::InvalidPackage(format!(
+                "package {} ({}): invalid package_hash format '{}' — expected sha256-<64 hex chars>",
+                i, pkg.name, pkg.package_hash
+            )));
+        }
+        if pkg.package_hash.starts_with("sha256-") && pkg.package_hash.len() != 71 {
             return Err(LockfileParseError::InvalidPackage(format!(
                 "package {} ({}): invalid package_hash format '{}' — expected sha256-<64 hex chars>",
                 i, pkg.name, pkg.package_hash

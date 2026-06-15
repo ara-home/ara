@@ -127,7 +127,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                     return Err(ManifestParseError::UnknownSourceType(source));
                 }
                 if let Some(ref ver) = raw.version {
-                    if !ver.is_empty() {
+                    if !ver.is_empty() && !ver.starts_with("catalog:") {
                         Constraint::parse(ver).map_err(|e| {
                             ManifestParseError::InvalidConstraint(format!("{}: {}", name, e))
                         })?;
