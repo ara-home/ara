@@ -33,7 +33,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }
 walkdir = { workspace = true }
-indicatif = "0.17"
+indicatif = "0.18"
 
 [features]
 nightly-bench = []
