@@ -111,17 +111,53 @@ pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError>
             if members.is_empty() {
                 None
             } else {
-                Some(Workspace { members })
+                Some(Workspace {
+                    members,
+                    catalog: None,
+                    catalogs: None,
+                })
             }
         }
         Some(serde_json::Value::Object(obj)) => {
-            obj.get("packages").and_then(|v| v.as_array()).map(|pkgs| {
-                let members: Vec<String> = pkgs
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
-                Workspace { members }
-            })
+            let members: Vec<String> = obj
+                .get("packages")
+                .and_then(|v| v.as_array())
+                .map(|pkgs| {
+                    pkgs.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let catalog = obj.get("catalog").and_then(|v| v.as_object()).map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
+
+            let catalogs = obj.get("catalogs").and_then(|v| v.as_object()).map(|m| {
+                m.iter()
+                    .filter_map(|(name, table)| {
+                        table.as_object().map(|entries| {
+                            let map = entries
+                                .iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect();
+                            (name.clone(), map)
+                        })
+                    })
+                    .collect()
+            });
+
+            if members.is_empty() && catalog.is_none() && catalogs.is_none() {
+                None
+            } else {
+                Some(Workspace {
+                    members,
+                    catalog,
+                    catalogs,
+                })
+            }
         }
         _ => None,
     };
@@ -135,7 +171,7 @@ pub fn parse_package_json(content: &str) -> Result<Manifest, ManifestParseError>
     Ok(Manifest {
         project,
         deps,
-        workspace: workspace.map(|w| crate::types::Workspace { members: w.members }),
+        workspace,
         scripts,
         security: None,
         build: None,
@@ -250,12 +286,46 @@ pub fn generate_package_json(manifest: &Manifest) -> String {
     }
 
     if let Some(ws) = &manifest.workspace {
-        let members: Vec<serde_json::Value> = ws
-            .members
-            .iter()
-            .map(|m| serde_json::Value::String(m.clone()))
-            .collect();
-        map.insert("workspaces".to_string(), serde_json::Value::Array(members));
+        if ws.catalog.is_none() && ws.catalogs.is_none() {
+            let members: Vec<serde_json::Value> = ws
+                .members
+                .iter()
+                .map(|m| serde_json::Value::String(m.clone()))
+                .collect();
+            map.insert("workspaces".to_string(), serde_json::Value::Array(members));
+        } else {
+            let mut ws_obj = serde_json::Map::new();
+            let members: Vec<serde_json::Value> = ws
+                .members
+                .iter()
+                .map(|m| serde_json::Value::String(m.clone()))
+                .collect();
+            ws_obj.insert("packages".to_string(), serde_json::Value::Array(members));
+
+            if let Some(cat) = &ws.catalog {
+                let cat_obj: serde_json::Map<String, serde_json::Value> = cat
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                ws_obj.insert("catalog".to_string(), serde_json::Value::Object(cat_obj));
+            }
+
+            if let Some(cats) = &ws.catalogs {
+                let cats_obj: serde_json::Map<String, serde_json::Value> = cats
+                    .iter()
+                    .map(|(name, entries)| {
+                        let entries_obj: serde_json::Map<String, serde_json::Value> = entries
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect();
+                        (name.clone(), serde_json::Value::Object(entries_obj))
+                    })
+                    .collect();
+                ws_obj.insert("catalogs".to_string(), serde_json::Value::Object(cats_obj));
+            }
+
+            map.insert("workspaces".to_string(), serde_json::Value::Object(ws_obj));
+        }
     }
 
     // Merge extras (preserved fields from original package.json)
@@ -640,6 +710,8 @@ mod tests {
             deps: vec![],
             workspace: Some(Workspace {
                 members: vec!["apps/*".into(), "packages/*".into()],
+                catalog: None,
+                catalogs: None,
             }),
             scripts: vec![],
             security: None,
@@ -700,5 +772,116 @@ mod tests {
         let deps = parsed["dependencies"].as_object().unwrap();
         assert_eq!(deps["pkg-a"].as_str(), Some("workspace:^"));
         assert_eq!(deps["zod"].as_str(), Some("^3.0.0"));
+    }
+
+    #[test]
+    fn test_parse_workspace_catalog_from_package_json() {
+        let json = r#"{
+            "name": "monorepo",
+            "version": "0.1.0",
+            "workspaces": {
+                "packages": ["packages/*"],
+                "catalog": {
+                    "react": "^19.0.0",
+                    "react-dom": "^19.0.0"
+                }
+            }
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+        assert_eq!(ws.members, vec!["packages/*"]);
+        let cat = ws.catalog.as_ref().unwrap();
+        assert_eq!(cat.get("react").unwrap(), "^19.0.0");
+        assert_eq!(cat.get("react-dom").unwrap(), "^19.0.0");
+    }
+
+    #[test]
+    fn test_parse_workspace_catalog_with_named_from_package_json() {
+        let json = r#"{
+            "name": "monorepo",
+            "version": "0.1.0",
+            "workspaces": {
+                "packages": ["packages/*"],
+                "catalog": { "react": "^19.0.0" },
+                "catalogs": {
+                    "testing": { "jest": "30.0.0", "vitest": "^1.0.0" }
+                }
+            }
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+        let cat = ws.catalog.as_ref().unwrap();
+        assert_eq!(cat.get("react").unwrap(), "^19.0.0");
+        let testing = &ws.catalogs.as_ref().unwrap()["testing"];
+        assert_eq!(testing.get("jest").unwrap(), "30.0.0");
+        assert_eq!(testing.get("vitest").unwrap(), "^1.0.0");
+    }
+
+    #[test]
+    fn test_parse_workspace_no_catalog_from_package_json() {
+        let json = r#"{
+            "name": "monorepo",
+            "version": "0.1.0",
+            "workspaces": ["packages/*"]
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+        assert!(ws.catalog.is_none());
+        assert!(ws.catalogs.is_none());
+    }
+
+    #[test]
+    fn test_generate_roundtrip_with_catalog() {
+        let json = r#"{
+            "name": "monorepo",
+            "version": "0.1.0",
+            "private": true,
+            "workspaces": {
+                "packages": ["packages/*"],
+                "catalog": {
+                    "react": "^19.0.0"
+                },
+                "catalogs": {
+                    "testing": { "jest": "30.0.0" }
+                }
+            }
+        }"#;
+        let m = parse_package_json(json).unwrap();
+        let generated = generate_package_json(&m);
+
+        // Should preserve private field
+        assert!(generated.contains(r#""private""#));
+
+        // Parse back and verify catalog
+        let parsed: serde_json::Value = serde_json::from_str(&generated).unwrap();
+        let ws = parsed["workspaces"].as_object().unwrap();
+        assert_eq!(ws["packages"][0].as_str(), Some("packages/*"));
+        assert_eq!(ws["catalog"]["react"].as_str(), Some("^19.0.0"));
+        assert_eq!(ws["catalogs"]["testing"]["jest"].as_str(), Some("30.0.0"));
+    }
+
+    #[test]
+    fn test_generate_array_workspaces_when_no_catalog() {
+        let m = Manifest {
+            project: Project {
+                name: "monorepo".into(),
+                version: "0.1.0".into(),
+            },
+            deps: vec![],
+            workspace: Some(Workspace {
+                members: vec!["packages/*".into()],
+                catalog: None,
+                catalogs: None,
+            }),
+            scripts: vec![],
+            security: None,
+            build: None,
+            package_json_extras: None,
+        };
+        let out = generate_package_json(&m);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // Should emit array form for backward compat
+        let ws = parsed["workspaces"].as_array().unwrap();
+        assert_eq!(ws[0].as_str(), Some("packages/*"));
     }
 }

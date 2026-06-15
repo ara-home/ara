@@ -15,7 +15,24 @@ pub fn generate(lockfile: &Lockfile) -> String {
     if let Some(h) = &lockfile.graph.graph_hash {
         let _ = writeln!(&mut out, "graph_hash = \"{h}\"");
     }
-    out.push('\n');
+    if let Some(ws) = &lockfile.workspace {
+        if let Some(cat) = &ws.catalog {
+            out.push_str("[workspace.catalog]\n");
+            for (k, v) in cat {
+                let _ = writeln!(&mut out, "{k} = \"{v}\"");
+            }
+            out.push('\n');
+        }
+        if let Some(cats) = &ws.catalogs {
+            for (name, entries) in cats {
+                let _ = writeln!(&mut out, "[workspace.catalogs.{name}]");
+                for (k, v) in entries {
+                    let _ = writeln!(&mut out, "{k} = \"{v}\"");
+                }
+            }
+            out.push('\n');
+        }
+    }
 
     for pkg in &lockfile.packages {
         out.push_str("[[package]]\n");
@@ -67,7 +84,7 @@ pub fn generate(lockfile: &Lockfile) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::types::{GraphMeta, PackageEntry, SbomMeta, SecurityMeta};
+    use crate::types::{GraphMeta, LockfileWorkspace, PackageEntry, SbomMeta, SecurityMeta};
 
     #[test]
     fn test_generate_and_parse_back() {
@@ -78,6 +95,7 @@ mod tests {
                 generated_at: Some("2026-06-01T22:00:00Z".to_string()),
                 graph_hash: Some("sha256:abc".to_string()),
             },
+            workspace: None,
             packages: vec![PackageEntry {
                 name: "zod".to_string(),
                 version: "3.23.8".to_string(),
@@ -106,6 +124,51 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_with_catalog() {
+        let cat = std::collections::HashMap::from([("react".to_string(), "^19.0.0".to_string())]);
+        let testing = std::collections::HashMap::from([("jest".to_string(), "30.0.0".to_string())]);
+        let cats = std::collections::HashMap::from([("testing".to_string(), testing)]);
+
+        let lf = Lockfile {
+            version: 1,
+            graph: GraphMeta {
+                resolver: "mvs".to_string(),
+                generated_at: None,
+                graph_hash: None,
+            },
+            workspace: Some(LockfileWorkspace {
+                catalog: Some(cat),
+                catalogs: Some(cats),
+            }),
+            packages: vec![],
+        };
+
+        let output = generate(&lf);
+        assert!(output.contains("[workspace.catalog]"));
+        assert!(output.contains(r#"react = "^19.0.0""#));
+        assert!(output.contains("[workspace.catalogs.testing]"));
+        assert!(output.contains(r#"jest = "30.0.0""#));
+
+        // Round-trip: parse back
+        let parsed = crate::parser::parse(&output).unwrap();
+        let ws = parsed.workspace.as_ref().unwrap();
+        assert_eq!(
+            ws.catalog.as_ref().unwrap().get("react").unwrap(),
+            "^19.0.0"
+        );
+        assert_eq!(
+            ws.catalogs
+                .as_ref()
+                .unwrap()
+                .get("testing")
+                .unwrap()
+                .get("jest")
+                .unwrap(),
+            "30.0.0"
+        );
+    }
+
+    #[test]
     fn test_generate_with_all_fields() {
         let lf = Lockfile {
             version: 1,
@@ -114,6 +177,7 @@ mod tests {
                 generated_at: Some("2026-06-01T22:00:00Z".to_string()),
                 graph_hash: None,
             },
+            workspace: None,
             packages: vec![PackageEntry {
                 name: "react".to_string(),
                 version: "18.3.0".to_string(),
