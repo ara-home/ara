@@ -339,6 +339,19 @@ impl fmt::Display for Constraint {
 }
 
 // ---------------------------------------------------------------------------
+// CatalogRef
+// ---------------------------------------------------------------------------
+
+/// A reference to a catalog entry, parsed from `catalog:` or `catalog:<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogRef {
+    /// Catalog name — empty string means the default catalog.
+    pub catalog_name: String,
+    /// The package name being looked up.
+    pub package_name: String,
+}
+
+// ---------------------------------------------------------------------------
 // PackageIdentity
 // ---------------------------------------------------------------------------
 
@@ -676,5 +689,40 @@ mod tests {
             let input = std::str::from_utf8(&buf[..len]).unwrap_or("");
             let _ = Constraint::parse(input);
         }
+    }
+
+    // ---- CatalogRef ----
+
+    #[test]
+    fn test_catalog_ref_default() {
+        let r = CatalogRef {
+            catalog_name: String::new(),
+            package_name: "react".to_string(),
+        };
+        assert_eq!(r.catalog_name, "");
+        assert_eq!(r.package_name, "react");
+    }
+
+    #[test]
+    fn test_catalog_ref_named() {
+        let r = CatalogRef {
+            catalog_name: "testing".to_string(),
+            package_name: "jest".to_string(),
+        };
+        assert_eq!(r.catalog_name, "testing");
+        assert_eq!(r.package_name, "jest");
+    }
+
+    #[test]
+    fn test_catalog_ref_equality() {
+        let a = CatalogRef {
+            catalog_name: "".to_string(),
+            package_name: "react".to_string(),
+        };
+        let b = CatalogRef {
+            catalog_name: "".to_string(),
+            package_name: "react".to_string(),
+        };
+        assert_eq!(a, b);
     }
 }

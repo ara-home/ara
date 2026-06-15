@@ -51,6 +51,10 @@ struct ProjectRaw {
 #[derive(serde::Deserialize)]
 struct WorkspaceRaw {
     members: Option<Vec<String>>,
+    #[allow(dead_code)]
+    catalog: Option<std::collections::HashMap<String, String>>,
+    #[allow(dead_code)]
+    catalogs: Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -123,7 +127,7 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
                     return Err(ManifestParseError::UnknownSourceType(source));
                 }
                 if let Some(ref ver) = raw.version {
-                    if !ver.is_empty() {
+                    if !ver.is_empty() && !ver.starts_with("catalog:") {
                         Constraint::parse(ver).map_err(|e| {
                             ManifestParseError::InvalidConstraint(format!("{}: {}", name, e))
                         })?;
@@ -161,9 +165,11 @@ pub fn parse(content: &str) -> Result<Manifest, ManifestParseError> {
         })
         .transpose()?;
 
-    let workspace = raw
-        .workspace
-        .and_then(|w| w.members.map(|members| Workspace { members }));
+    let workspace = raw.workspace.map(|w| Workspace {
+        members: w.members.unwrap_or_default(),
+        catalog: w.catalog,
+        catalogs: w.catalogs,
+    });
 
     let scripts = raw.scripts.map_or_else(Vec::new, |map| {
         map.into_iter()
@@ -430,5 +436,95 @@ mod tests {
         let huge = format!("{src}\nhuge = 999999999999999999999999999");
         let result = parse(&huge);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_workspace_catalog_default() {
+        let src = r#"
+            [project]
+            name = "monorepo"
+            version = "0.1.0"
+
+            [workspace]
+            members = ["packages/*"]
+
+            [workspace.catalog]
+            react = "^19.0.0"
+            react-dom = "^19.0.0"
+        "#;
+        let m = parse(src).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+        let cat = ws.catalog.as_ref().unwrap();
+        assert_eq!(cat.get("react").unwrap(), "^19.0.0");
+        assert_eq!(cat.get("react-dom").unwrap(), "^19.0.0");
+        assert!(cat.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_parse_workspace_catalog_with_named() {
+        let src = r#"
+            [project]
+            name = "monorepo"
+            version = "0.1.0"
+
+            [workspace]
+            members = ["packages/*"]
+
+            [workspace.catalog]
+            react = "^19.0.0"
+
+            [workspace.catalogs.testing]
+            jest = "30.0.0"
+            vitest = "^1.0.0"
+        "#;
+        let m = parse(src).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+
+        let cat = ws.catalog.as_ref().unwrap();
+        assert_eq!(cat.get("react").unwrap(), "^19.0.0");
+
+        let testing = &ws.catalogs.as_ref().unwrap()["testing"];
+        assert_eq!(testing.get("jest").unwrap(), "30.0.0");
+        assert_eq!(testing.get("vitest").unwrap(), "^1.0.0");
+    }
+
+    #[test]
+    fn test_parse_workspace_catalog_only_named() {
+        let src = r#"
+            [project]
+            name = "monorepo"
+            version = "0.1.0"
+
+            [workspace]
+            members = ["packages/*"]
+            catalog = { zod = "^3.23.0" }
+
+            [workspace.catalogs.build]
+            typescript = "^5.0.0"
+        "#;
+        let m = parse(src).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+
+        let cat = ws.catalog.as_ref().unwrap();
+        assert_eq!(cat.get("zod").unwrap(), "^3.23.0");
+
+        let build = &ws.catalogs.as_ref().unwrap()["build"];
+        assert_eq!(build.get("typescript").unwrap(), "^5.0.0");
+    }
+
+    #[test]
+    fn test_parse_workspace_no_catalog() {
+        let src = r#"
+            [project]
+            name = "simple"
+            version = "0.1.0"
+
+            [workspace]
+            members = ["packages/*"]
+        "#;
+        let m = parse(src).unwrap();
+        let ws = m.workspace.as_ref().unwrap();
+        assert!(ws.catalog.is_none());
+        assert!(ws.catalogs.is_none());
     }
 }

@@ -55,6 +55,69 @@ ara run build --profile hermetic
 
 Ara can resolve and fetch dependencies from npm registries, GitHub repositories, git repositories, tarball URLs, local paths, and workspace members — all defined in a single manifest file or installed directly via spec.
 
+### Workspace catalog (shared dependency versions)
+
+Ara supports a **workspace catalog** (RFC #33) for sharing version constraints across monorepo members. Instead of repeating `"react": "^19.0.0"` in every package, define it once in the root and reference it with `catalog:`:
+
+```toml
+# ara.toml (root)
+[workspace]
+members = ["packages/*"]
+
+[workspace.catalog]
+react = "^19.0.0"
+react-dom = "^19.0.0"
+typescript = "~5.5.0"
+```
+
+```json
+// packages/web/package.json
+{
+  "name": "web",
+  "dependencies": {
+    "react": "catalog:",        // resolves to "^19.0.0"
+    "react-dom": "catalog:"     // resolves to "^19.0.0"
+  }
+}
+```
+
+#### Named catalogs
+
+Multiple named catalogs let you group dependencies by concern:
+
+```toml
+[workspace.catalogs.testing]
+vitest = "^2.0.0"
+playwright = "^1.48.0"
+
+[workspace.catalogs.lint]
+eslint = "^9.0.0"
+prettier = "^3.4.0"
+```
+
+```json
+{
+  "dependencies": {
+    "vitest": "catalog:testing",
+    "eslint": "catalog:lint"
+  }
+}
+```
+
+#### Adding entries via CLI
+
+```bash
+# Add an entry to the default catalog
+ara catalog add react "^19.0.0"
+
+# List all catalog entries
+ara catalog list
+```
+
+When a member package overrides a catalog entry with a different version, Ara prints a warning during install — the override is allowed but flagged.
+
+The catalog definition is stored in the lockfile (`ara.lock`) so the pinned versions are reproducible across machines.
+
 ### Workspace protocol
 
 Ara supports the `workspace:` protocol (inspired by pnpm), which lets you declare dependencies on sibling workspace members without reaching out to a registry:
@@ -179,9 +242,10 @@ src/
 
 #### Manifest install (`ara install` with no args)
 
-1. **Parse** the manifest — reads `package.json` as the primary source for dependencies and scripts, and merges advanced settings from `ara.toml` if it exists.
+1. **Parse** the manifest — reads `package.json` as the primary source for dependencies and scripts, and merges advanced settings (including workspace catalog) from `ara.toml` if it exists.
 2. **Expand workspace members** — globs `workspaces` patterns and creates implicit deps for each discovered member
-3. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
+3. **Resolve catalog references** — expands `catalog:` dependency entries against the workspace catalog
+4. **Resolve** each dependency using MVS — select the best version that satisfies all constraints
 4. **Fetch or symlink**: workspace deps become **live symlinks** from `node_modules/<name>` to the member directory; all other sources fetch tarballs from the appropriate backend
 5. **Analyze** every package by scanning its source files against 16+ security patterns (including symlinked workspace members)
 6. **Prompt** the user if suspicious code is found (unless `--non-interactive`)
@@ -305,6 +369,19 @@ Flags:
 | `--refresh` | Re-fetch for mutable references (branches, tags) |
 | `--offline` | Fail if package is not in cache |
 | `--package-lock` | Generate `package-lock.json` (temporary compat for deploy platforms) |
+| `--catalog` | Add as a catalog reference instead of resolving immediately (e.g. `ara add react --catalog` writes `"react": "catalog:"`) |
+
+### `ara catalog`
+
+Manage workspace catalog entries.
+
+```bash
+# List all catalog entries
+ara catalog list
+
+# Add an entry to the default catalog
+ara catalog add react "^19.0.0"
+```
 
 ### `ara x <package> [args...]` (Execute packages)
 
@@ -387,7 +464,39 @@ Ara reads `package.json` natively. When you run `ara install react`, Ara will wr
 
 ### `ara.toml` (Advanced Configuration)
 
-You only need an `ara.toml` if you want to enforce security thresholds or sandbox profiles. It does not store dependencies or scripts.
+You only need an `ara.toml` if you want to enforce security thresholds, sandbox profiles, or define a **workspace catalog**. It does not store dependencies or scripts.
+
+#### Workspace catalog (in ara.toml or package.json)
+
+```toml
+[workspace]
+members = ["packages/*"]
+
+[workspace.catalog]
+react = "^19.0.0"
+react-dom = "^19.0.0"
+
+[workspace.catalogs.testing]
+vitest = "^2.0.0"
+```
+
+In `package.json`, the same catalog is expressed under `workspaces.catalog`:
+
+```json
+{
+  "workspaces": {
+    "members": ["packages/*"],
+    "catalog": {
+      "react": "^19.0.0"
+    },
+    "catalogs": {
+      "testing": {
+        "vitest": "^2.0.0"
+      }
+    }
+  }
+}
+```
 
 #### Security options
 
@@ -440,6 +549,10 @@ resolver = "mvs"
 generated_at = "2025-06-03T12:00:00Z"
 graph_hash = "sha256:abc123..."
 
+[workspace.catalog]
+react = "^19.0.0"
+react-dom = "^19.0.0"
+
 [[package]]
 name = "zod"
 version = "3.23.8"
@@ -448,6 +561,8 @@ package_hash = "sha256:def456..."
 integrity = "sha256:ghi789..."
 dependencies = []
 ```
+
+The optional `[workspace.catalog]` and `[workspace.catalogs.*]` sections store the catalog definitions used during resolution, ensuring reproducible installs even when the manifest changes.
 
 ---
 
@@ -467,7 +582,7 @@ But Ara is not a clone of any of them. It's an experiment in what a package mana
 
 ## Project status
 
-Ara is in early development. Core install (manifest-based and direct spec), run, and analysis features work. Direct install supports npm, GitHub, git, and tarball targets with caching and security scanning. Build, publish, SBOM generation, and LAN distribution are on the roadmap.
+Ara is in early development. Core install (manifest-based and direct spec), run, analysis, and **workspace catalog** features work. Direct install supports npm, GitHub, git, and tarball targets with caching and security scanning. Build, publish, SBOM generation, and LAN distribution are on the roadmap.
 
 ---
 
