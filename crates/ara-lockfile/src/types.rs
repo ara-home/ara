@@ -38,11 +38,25 @@ pub struct PackageEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockfileWorkspace {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalogs:
+        Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lockfile {
     #[serde(default)]
     pub version: u32,
     #[serde(default = "default_graph_meta")]
     pub graph: GraphMeta,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<LockfileWorkspace>,
     #[serde(default)]
     #[serde(rename = "package")]
     pub packages: Vec<PackageEntry>,
@@ -148,5 +162,49 @@ mod tests {
             Some("low")
         );
         assert_eq!(pkg.sbom.as_ref().unwrap().license.as_deref(), Some("MIT"));
+    }
+
+    #[test]
+    fn test_deserialize_with_workspace_catalog() {
+        let toml_str = r#"
+            version = 1
+            [graph]
+            resolver = "mvs"
+
+            [workspace.catalog]
+            react = "^19.0.0"
+            react-dom = "^19.0.0"
+
+            [workspace.catalogs.testing]
+            jest = "30.0.0"
+        "#;
+        let lf: Lockfile = toml::from_str(toml_str).unwrap();
+        let ws = lf.workspace.as_ref().unwrap();
+        assert_eq!(
+            ws.catalog.as_ref().unwrap().get("react").unwrap(),
+            "^19.0.0"
+        );
+        assert_eq!(
+            ws.catalogs
+                .as_ref()
+                .unwrap()
+                .get("testing")
+                .unwrap()
+                .get("jest")
+                .unwrap(),
+            "30.0.0"
+        );
+        assert!(lf.packages.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_no_workspace() {
+        let toml_str = r#"
+            version = 1
+            [graph]
+            resolver = "mvs"
+        "#;
+        let lf: Lockfile = toml::from_str(toml_str).unwrap();
+        assert!(lf.workspace.is_none());
     }
 }

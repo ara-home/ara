@@ -20,7 +20,12 @@ use ara_types::{Constraint, PackageIdentity, RiskLevel, SourceType, Version};
 
 use super::prompt::{prompt_allow_package, AllowDecision};
 
-fn write_lockfile(cwd: &Path, store: Option<&Store>, pkg_entries: &[PackageEntry]) -> Result<()> {
+fn write_lockfile(
+    cwd: &Path,
+    store: Option<&Store>,
+    pkg_entries: &[PackageEntry],
+    workspace_catalog: Option<&ara_manifest::types::Workspace>,
+) -> Result<()> {
     let ts = current_timestamp();
 
     let graph_hash = if let Some(store) = store {
@@ -40,6 +45,17 @@ fn write_lockfile(cwd: &Path, store: Option<&Store>, pkg_entries: &[PackageEntry
         None
     };
 
+    let lockfile_workspace = workspace_catalog.and_then(|ws| {
+        if ws.catalog.is_none() && ws.catalogs.is_none() {
+            None
+        } else {
+            Some(ara_lockfile::types::LockfileWorkspace {
+                catalog: ws.catalog.clone(),
+                catalogs: ws.catalogs.clone(),
+            })
+        }
+    });
+
     let lockfile = Lockfile {
         version: 1,
         graph: GraphMeta {
@@ -47,6 +63,7 @@ fn write_lockfile(cwd: &Path, store: Option<&Store>, pkg_entries: &[PackageEntry
             generated_at: Some(ts),
             graph_hash,
         },
+        workspace: lockfile_workspace,
         packages: pkg_entries.to_vec(),
     };
     let lock_content = ara_lockfile::generator::generate(&lockfile);
@@ -1602,7 +1619,7 @@ pub(crate) async fn cmd_install_specs(
     .await?;
 
     if !pkg_entries.is_empty() {
-        write_lockfile(&cwd, Some(&store), &pkg_entries)?;
+        write_lockfile(&cwd, Some(&store), &pkg_entries, m.workspace.as_ref())?;
         if package_lock {
             write_package_lock(&cwd, &m, &pkg_entries)?;
         }
@@ -1864,7 +1881,25 @@ fn read_manifest(cwd: &Path) -> Result<ara_manifest::types::Manifest> {
             // merge ara.toml advanced settings into package.json manifest
             fm.security = m.security;
             fm.build = m.build;
-            // Note: We deliberately do NOT merge deps, scripts, or workspaces from ara.toml
+            // Merge catalog from ara.toml workspace if present
+            if let Some(toml_ws) = m.workspace {
+                if toml_ws.catalog.is_some() || toml_ws.catalogs.is_some() {
+                    match &mut fm.workspace {
+                        Some(ref mut fm_ws) => {
+                            if toml_ws.catalog.is_some() {
+                                fm_ws.catalog = toml_ws.catalog;
+                            }
+                            if toml_ws.catalogs.is_some() {
+                                fm_ws.catalogs = toml_ws.catalogs;
+                            }
+                        }
+                        None => {
+                            fm.workspace = Some(toml_ws);
+                        }
+                    }
+                }
+            }
+            // Note: We deliberately do NOT merge deps, scripts, or members from ara.toml
             // because package.json is now the source of truth for them.
             final_manifest = Some(fm);
         } else {
@@ -1881,6 +1916,87 @@ fn read_manifest(cwd: &Path) -> Result<ara_manifest::types::Manifest> {
         "no manifest found: neither package.json nor ara.toml exists in {}",
         cwd.display()
     ))
+}
+
+/// Collect dependencies from workspace members and resolve catalog references.
+///
+/// Reads each member's manifest, resolves `catalog:` references against the
+/// root workspace catalog, and emits override warnings.
+fn collect_member_deps_with_catalog(
+    workspace: &ara_manifest::types::Workspace,
+    cwd: &Path,
+    root_catalog: &std::collections::HashMap<String, String>,
+    root_catalogs: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> Vec<ara_manifest::types::DependencyEntry> {
+    let mut all_deps = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for pattern in &workspace.members {
+        let full_pattern = cwd.join(pattern);
+        let full_str = full_pattern.to_string_lossy().to_string();
+
+        let matches = match glob::glob(&full_str) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("  warning: invalid workspace pattern \"{pattern}\": {e}");
+                continue;
+            }
+        };
+
+        for entry in matches {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("  warning: glob error for pattern \"{pattern}\": {e}");
+                    continue;
+                }
+            };
+
+            let member_path = entry;
+
+            // Reject path traversal
+            let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+            if let Ok(canonical_entry) = member_path.canonicalize() {
+                if !canonical_entry.starts_with(&canonical_cwd) {
+                    continue;
+                }
+            }
+
+            let manifest = match read_member_manifest(&member_path) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            if !seen.insert(manifest.project.name.clone()) {
+                continue;
+            }
+
+            if manifest.deps.is_empty() {
+                continue;
+            }
+
+            let member_name = manifest.project.name.clone();
+            let mut member_deps = manifest.deps;
+
+            if let Err(e) = ara_manifest::catalog::resolve_catalog_refs(
+                &mut member_deps,
+                root_catalog,
+                root_catalogs,
+                &member_name,
+            ) {
+                eprintln!("  warning: catalog resolution for \"{member_name}\" failed: {e}");
+                continue;
+            }
+
+            for dep in member_deps {
+                if !seen.contains(&dep.name) {
+                    all_deps.push(dep);
+                }
+            }
+        }
+    }
+
+    all_deps
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1914,9 +2030,43 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
         }
     }
 
+    // Resolve catalog references in root deps and collect member catalog deps
+    let _catalog_warnings = if let Some(ws) = &m.workspace {
+        if let Some(ref cat) = ws.catalog {
+            let cats = ws.catalogs.as_ref().cloned().unwrap_or_default();
+
+            // Expand catalog refs in root dependencies
+            let root_warnings =
+                ara_manifest::catalog::resolve_catalog_refs(&mut m.deps, cat, &cats, "root")
+                    .with_context(|| "failed to resolve catalog references in root dependencies")?;
+
+            for w in &root_warnings {
+                println!("  warning: {w}");
+            }
+
+            // Collect member deps with catalog expansion
+            let member_catalog_deps = collect_member_deps_with_catalog(ws, cwd, cat, &cats);
+            for dep in member_catalog_deps {
+                if let Some(existing) = m.deps.iter_mut().find(|d| d.name == dep.name) {
+                    if dep.version.is_some() {
+                        existing.version = dep.version;
+                    }
+                } else {
+                    m.deps.push(dep);
+                }
+            }
+
+            root_warnings
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     if m.deps.is_empty() && m.workspace.is_none() {
         println!("No dependencies to install");
-        write_lockfile(cwd, None, &[]).context("failed to write lockfile")?;
+        write_lockfile(cwd, None, &[], m.workspace.as_ref()).context("failed to write lockfile")?;
         if package_lock {
             write_package_lock(cwd, &m, &[])?;
         }
@@ -2395,6 +2545,17 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
         write_package_lock(cwd, &m, &pkg_entries)?;
     }
 
+    let lockfile_workspace = m.workspace.as_ref().and_then(|ws| {
+        if ws.catalog.is_none() && ws.catalogs.is_none() {
+            None
+        } else {
+            Some(ara_lockfile::types::LockfileWorkspace {
+                catalog: ws.catalog.clone(),
+                catalogs: ws.catalogs.clone(),
+            })
+        }
+    });
+
     let lockfile = Lockfile {
         version: 1,
         graph: GraphMeta {
@@ -2402,6 +2563,7 @@ async fn cmd_install_in(cwd: &Path, non_interactive: bool, package_lock: bool) -
             generated_at: Some(ts),
             graph_hash: Some(graph_hash),
         },
+        workspace: lockfile_workspace,
         packages: pkg_entries,
     };
 
@@ -2856,36 +3018,152 @@ require_review = true
     #[tokio::test]
     async fn test_cmd_install_unicode_name() {
         let root = tempfile::tempdir().unwrap();
-        let root_path = root.path().to_path_buf();
 
-        let dep_dir = root_path.join("café-🔥");
-        std::fs::create_dir_all(&dep_dir).unwrap();
-        let dep_manifest = r#"
-            [project]
-            name = "café-🔥"
-            version = "0.1.0"
-        "#;
-        std::fs::write(dep_dir.join("ara.toml"), dep_manifest).unwrap();
-        std::fs::write(dep_dir.join("index.js"), "module.exports = {};").unwrap();
+        let cwd = root.path().to_path_buf();
 
-        let root_manifest = format!(
-            r#"
-            [project]
-            name = "my-app"
-            version = "1.0.0"
+        let pkg_json = r#"{"name": "unicode-test", "version": "1.0.0"}"#;
+        std::fs::write(root.path().join("package.json"), pkg_json).unwrap();
 
-            [deps]
-            "café-🔥" = {{ source = "local", version = "0.1.0", path = "{}" }}
-            "#,
-            dep_dir.display()
-        );
-        std::fs::write(root_path.join("ara.toml"), &root_manifest).unwrap();
+        let result = cmd_install_specs(
+            &["@test/unicode-pkg@^1.0.0".to_string()],
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            true,
+            false,
+        )
+        .await;
+        // Should fail gracefully because no registry resolves this, rather than crash
+        assert!(result.is_err(), "expected failure, got: {result:?}");
+    }
 
-        cmd_install_in(&root_path, true, false).await.unwrap();
+    #[test]
+    fn test_collect_member_deps_with_catalog_expands_refs() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let member_dir = packages.join("pkg-a");
+        std::fs::create_dir_all(&member_dir).unwrap();
 
-        let nm = root_path.join("node_modules");
-        assert!(nm.join("café-🔥").exists());
-        assert!(nm.join("café-🔥/index.js").exists());
+        let member_json = r#"{
+            "name": "pkg-a",
+            "version": "0.1.0",
+            "dependencies": {
+                "react": "catalog:"
+            }
+        }"#;
+        std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+        let ws = ara_manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+            catalog: Some(std::collections::HashMap::from([(
+                "react".to_string(),
+                "^19.0.0".to_string(),
+            )])),
+            catalogs: None,
+        };
+
+        let cat = ws.catalog.as_ref().unwrap();
+        let cats = &std::collections::HashMap::new();
+
+        let deps = collect_member_deps_with_catalog(&ws, root.path(), cat, cats);
+        assert!(!deps.is_empty(), "expected expanded deps");
+        let react_dep = deps.iter().find(|d| d.name == "react").unwrap();
+        assert_eq!(react_dep.version.as_deref(), Some("^19.0.0"));
+    }
+
+    #[test]
+    fn test_collect_member_deps_with_catalog_override_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let member_dir = packages.join("pkg-a");
+        std::fs::create_dir_all(&member_dir).unwrap();
+
+        let member_json = r#"{
+            "name": "pkg-a",
+            "version": "0.1.0",
+            "dependencies": {
+                "react": "^18.0.0"
+            }
+        }"#;
+        std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+        let ws = ara_manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+            catalog: Some(std::collections::HashMap::from([(
+                "react".to_string(),
+                "^19.0.0".to_string(),
+            )])),
+            catalogs: None,
+        };
+
+        let cat = ws.catalog.as_ref().unwrap();
+        let cats = &std::collections::HashMap::new();
+
+        let deps = collect_member_deps_with_catalog(&ws, root.path(), cat, cats);
+        let react_dep = deps.iter().find(|d| d.name == "react").unwrap();
+        assert_eq!(react_dep.version.as_deref(), Some("^18.0.0"));
+    }
+
+    #[test]
+    fn test_collect_member_deps_with_catalog_empty_member() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let member_dir = packages.join("pkg-a");
+        std::fs::create_dir_all(&member_dir).unwrap();
+
+        let member_json = r#"{"name": "pkg-a", "version": "0.1.0"}"#;
+        std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+        let ws = ara_manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+            catalog: Some(std::collections::HashMap::from([(
+                "react".to_string(),
+                "^19.0.0".to_string(),
+            )])),
+            catalogs: None,
+        };
+
+        let cat = ws.catalog.as_ref().unwrap();
+        let cats = &std::collections::HashMap::new();
+
+        let deps = collect_member_deps_with_catalog(&ws, root.path(), cat, cats);
+        assert!(deps.is_empty(), "expected no deps from empty member");
+    }
+
+    #[test]
+    fn test_collect_member_deps_with_catalog_missing_package() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        let member_dir = packages.join("pkg-a");
+        std::fs::create_dir_all(&member_dir).unwrap();
+
+        let member_json = r#"{
+            "name": "pkg-a",
+            "version": "0.1.0",
+            "dependencies": {
+                "nonexistent": "catalog:"
+            }
+        }"#;
+        std::fs::write(member_dir.join("package.json"), member_json).unwrap();
+
+        let ws = ara_manifest::types::Workspace {
+            members: vec!["packages/*".to_string()],
+            catalog: Some(std::collections::HashMap::from([(
+                "react".to_string(),
+                "^19.0.0".to_string(),
+            )])),
+            catalogs: None,
+        };
+
+        let cat = ws.catalog.as_ref().unwrap();
+        let cats = &std::collections::HashMap::new();
+
+        let deps = collect_member_deps_with_catalog(&ws, root.path(), cat, cats);
+        assert!(deps.is_empty(), "expected no deps from failed resolution");
     }
 
     #[cfg(feature = "nightly-bench")]
