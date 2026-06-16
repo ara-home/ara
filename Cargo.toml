@@ -29,7 +29,7 @@ hex = "0.4"
 toml = "1.0"
 regex = "1"
 walkdir = "2"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }
 tar = "0.4"
 flate2 = "1"
 tempfile = "3"

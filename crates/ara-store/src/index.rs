@@ -264,9 +264,9 @@ impl StoreIndex {
         Ok((removed_objects, removed_extracted))
     }
 
-    pub fn entry_count(&self) -> Result<u64, IndexError> {
+    pub fn entry_count(&self) -> Result<i64, IndexError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let count: u64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))?;
         Ok(count)
     }
 
