@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result};
 
@@ -29,22 +29,28 @@ fn rel_path_escapes(rel_path: &str) -> bool {
     false
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                components.pop();
-            }
-            Component::CurDir => {}
-            other => components.push(other.as_os_str().to_os_string()),
+/// Returns `true` if `target`, after resolving symlinks on the filesystem,
+/// would resolve to a location outside `canonical_dest`.
+///
+/// Handles non-existent leaf components by walking up to the nearest existing
+/// ancestor and resolving from there. This catches symlink-based path traversal
+/// where an earlier tarball entry creates a symlink that redirects a later
+/// entry's path outside the destination directory.
+fn target_escapes_dest(target: &Path, canonical_dest: &Path) -> bool {
+    let mut path = Some(target);
+    while let Some(p) = path {
+        if let Ok(resolved) = p.canonicalize() {
+            let remaining = target.strip_prefix(p).unwrap_or(Path::new(""));
+            let full = if remaining.as_os_str().is_empty() {
+                resolved
+            } else {
+                resolved.join(remaining)
+            };
+            return !full.starts_with(canonical_dest);
         }
+        path = p.parent();
     }
-    let mut result = PathBuf::new();
-    for c in components {
-        result.push(c);
-    }
-    result
+    true
 }
 
 pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
@@ -102,9 +108,26 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         let target = dest.join(stripped);
-        let normalized = normalize_path(&target);
-        if !normalized.starts_with(&canonical_dest) {
+        if target_escapes_dest(&target, &canonical_dest) {
             anyhow::bail!("path traversal detected in tarball: {}", stripped.display());
+        }
+
+        // Validate symlink targets: the link itself must not point outside dest
+        if entry.header().entry_type().is_symlink() {
+            if let Some(link_target) = entry.link_name().context("failed to read link name")? {
+                let link_dest = if link_target.is_absolute() {
+                    link_target.to_path_buf()
+                } else {
+                    target.parent().unwrap_or(&target).join(&link_target)
+                };
+                if target_escapes_dest(&link_dest, &canonical_dest) {
+                    anyhow::bail!(
+                        "symlink target escapes destination: {} -> {}",
+                        stripped.display(),
+                        link_target.display(),
+                    );
+                }
+            }
         }
 
         if let Some(parent) = target.parent() {
@@ -354,6 +377,137 @@ mod tests {
         let mut header = tar::Header::new_gnu();
         let result = header.set_path("../../../etc/passwd");
         assert!(result.is_err(), "tar crate should reject paths with ..");
+    }
+
+    #[test]
+    fn test_extract_tarball_symlink_absolute_target_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_path("evil_link").unwrap();
+        header.set_link_name("/etc").unwrap();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_cksum();
+        ar.append(&header, std::io::empty()).unwrap();
+
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let result = extract_tarball(&buf, &dest);
+        assert!(
+            result.is_err(),
+            "should reject symlink with absolute target outside dest"
+        );
+    }
+
+    #[test]
+    fn test_extract_tarball_symlink_write_through() {
+        // The attack requires entries that do NOT share a common prefix
+        // (otherwise prefix-stripping removes the symlink entry).
+        // We insert a dummy entry at the start to break prefix detection.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+
+        // Entry 1: dummy file to break common prefix
+        let mut header = tar::Header::new_gnu();
+        header.set_path("dummy").unwrap();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"data" as &[u8]).unwrap();
+
+        // Entry 2: symlink pointing outside dest
+        let mut header = tar::Header::new_gnu();
+        header.set_path("safe_dir").unwrap();
+        header.set_link_name("/etc").unwrap();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_cksum();
+        ar.append(&header, std::io::empty()).unwrap();
+
+        // Entry 3: regular file through the symlink
+        let mut header = tar::Header::new_gnu();
+        header.set_path("safe_dir/evil.txt").unwrap();
+        header.set_size(12);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"evil content\n" as &[u8]).unwrap();
+
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let result = extract_tarball(&buf, &dest);
+        assert!(
+            result.is_err(),
+            "should reject write-through-symlink attack"
+        );
+    }
+
+    #[test]
+    fn test_extract_tarball_symlink_relative_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        ar.append_link(&mut header, "escape_link", "../../etc")
+            .unwrap();
+
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let result = extract_tarball(&buf, &dest);
+        assert!(
+            result.is_err(),
+            "should reject symlink with relative target escaping dest"
+        );
+    }
+
+    #[test]
+    fn test_extract_tarball_symlink_within_dest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+
+        // Entry 1: target file
+        let mut header = tar::Header::new_gnu();
+        header.set_path("real_target.txt").unwrap();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"hello" as &[u8]).unwrap();
+
+        // Entry 2: relative symlink within dest
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        ar.append_link(&mut header, "my_link", "real_target.txt")
+            .unwrap();
+
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        extract_tarball(&buf, &dest).unwrap();
+        let content = std::fs::read_to_string(dest.join("my_link")).unwrap();
+        assert_eq!(content, "hello");
     }
 
     #[test]
