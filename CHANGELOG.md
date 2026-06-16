@@ -1,4 +1,14 @@
 
+## [0.13.1] - 2026-06-16
+
+### 💼 Other
+
+- *(sandbox)* [Fix security issues in sandbox] seccomp-BPF, path traversal, and more (#61)
+- Bump to v0.13.1
+
+### 📚 Documentation
+
+- Update CHANGELOG.md (#45)
 ## [0.13.0] - 2026-06-15
 
 ### 🚀 Features
