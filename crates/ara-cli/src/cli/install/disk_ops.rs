@@ -54,7 +54,11 @@ fn target_escapes_dest(target: &Path, canonical_dest: &Path) -> bool {
 }
 
 pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
-    // Pass 1: detect prefix without allocating file data
+    // Pass 1: detect common path prefix among non-root entries.
+    // For example, entries like "./foo" and "./bar" share the prefix ".",
+    // which can be stripped so that "foo" and "bar" land directly in dest.
+    // Pure CurDir entries (count ≤ 1) are skipped: they don't carry a
+    // usable prefix and would only confuse the detection.
     let prefix = {
         let decoder = flate2::read::GzDecoder::new(tarball);
         let mut archive = tar::Archive::new(decoder);
@@ -65,14 +69,22 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         if let Ok(entries) = archive.entries() {
             for entry in entries.flatten() {
                 if let Ok(path) = entry.path() {
-                    let comp = path.components().next();
+                    let owned = path.into_owned();
+                    // Skip entries that are only CurDir (e.g. "." or "./")
+                    if owned.components().count() <= 1
+                        && owned.components().next() == Some(std::path::Component::CurDir)
+                    {
+                        continue;
+                    }
+
+                    let comp = owned.components().next();
                     if is_first {
                         common = comp.map(|c| c.as_os_str().to_os_string());
                         is_first = false;
                     } else if common.is_some() && comp.map(|c| c.as_os_str()) != common.as_deref() {
                         common = None;
                     }
-                    if path.components().count() > 1 {
+                    if owned.components().count() > 1 {
                         has_files = true;
                     }
                 }
@@ -103,7 +115,11 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
             .into_owned();
 
         let stripped = path.strip_prefix(&prefix).unwrap_or(&path);
-        if stripped.as_os_str().is_empty() {
+        if stripped.as_os_str().is_empty()
+            || stripped
+                .components()
+                .all(|c| c == std::path::Component::CurDir)
+        {
             continue;
         }
 
@@ -146,16 +162,26 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create parent {}", parent.display()))?;
 
             // Re-verify parent integrity: create_dir_all follows symlinks,
             // so a parent symlink pointing outside dest would redirect the
             // unpack even if the leaf was cleaned above.
-            let resolved_parent = parent
-                .canonicalize()
-                .with_context(|| format!("failed to resolve parent of {}", target.display()))?;
+            let resolved_parent = parent.canonicalize().with_context(|| {
+                format!(
+                    "failed to resolve parent {} (canonical_dest: {})",
+                    parent.display(),
+                    canonical_dest.display()
+                )
+            })?;
             if !resolved_parent.starts_with(&canonical_dest) {
-                anyhow::bail!("parent path escapes destination: {}", parent.display(),);
+                anyhow::bail!(
+                    "parent path escapes destination: {} (resolved: {}, dest: {})",
+                    parent.display(),
+                    resolved_parent.display(),
+                    canonical_dest.display(),
+                );
             }
         }
 
@@ -168,7 +194,13 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
             }
         }
 
-        entry.unpack(&target).context("failed to unpack entry")?;
+        entry.unpack(&target).with_context(|| {
+            format!(
+                "failed to unpack entry {} -> {}",
+                stripped.display(),
+                target.display()
+            )
+        })?;
 
         // Strip dangerous permissions: remove setuid/setgid/sticky bits
         // and world-writable, keep owner/group/other read/write/execute as-is
