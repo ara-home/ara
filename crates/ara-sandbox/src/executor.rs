@@ -46,9 +46,14 @@ impl Executor {
             }
         }
 
+        // Build the BPF filter in the parent process (heap allocation is
+        // safe here).  The pre-built filter is passed as a reference to the
+        // async-signal-safe pre_exec closure so the child only calls prctl().
         #[cfg(target_os = "linux")]
-        unsafe {
-            cmd.pre_exec(move || apply_seccomp(profile));
+        if let Some(filter) = build_seccomp_filter_for_profile(profile) {
+            unsafe {
+                cmd.pre_exec(move || apply_seccomp_filter(&filter));
+            }
         }
 
         let mut child = cmd.spawn()?;
@@ -83,9 +88,14 @@ impl Executor {
             }
         }
 
+        // Build the BPF filter in the parent process (heap allocation is
+        // safe here).  The pre-built filter is passed as a reference to the
+        // async-signal-safe pre_exec closure so the child only calls prctl().
         #[cfg(target_os = "linux")]
-        unsafe {
-            cmd.pre_exec(move || apply_seccomp(profile));
+        if let Some(filter) = build_seccomp_filter_for_profile(profile) {
+            unsafe {
+                cmd.pre_exec(move || apply_seccomp_filter(&filter));
+            }
         }
 
         let mut child = cmd.spawn()?;
@@ -134,8 +144,12 @@ const BPF_ABS: u16 = 0x20;
 const BPF_JEQ: u16 = 0x10;
 const BPF_K: u16 = 0x00;
 
-const SECCOMP_RET_KILL: u32 = 0x0000_0000;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+
+// Audit architecture for x86_64 (used in seccomp arch validation)
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
 
 // seccomp constants
 const PR_SET_SECCOMP: i32 = 22;
@@ -216,7 +230,6 @@ mod sys {
     pub const SYSFS: i32 = 139;
     pub const GETRLIMIT: i32 = 161;
     pub const SETRLIMIT: i32 = 160;
-    pub const PRCTL: i32 = 157;
     pub const FUTEX: i32 = 202;
     pub const CLOCK_GETTIME: i32 = 228;
     pub const CLOCK_NANOSLEEP: i32 = 230;
@@ -231,6 +244,9 @@ mod sys {
     pub const MKDIRAT: i32 = 258;
     pub const GETRANDOM: i32 = 318;
     pub const EPOLL_CREATE: i32 = 213;
+    pub const CLONE: i32 = 56;
+    pub const FORK: i32 = 57;
+    pub const VFORK: i32 = 58;
 }
 
 // Syscall whitelists per profile
@@ -257,7 +273,9 @@ const HERMETIC_SYSCALLS: &[i32] = &[
     sys::FSTAT,
     sys::NEWFSTATAT,
     sys::GETRANDOM,
-    sys::PRCTL,
+    sys::FORK,
+    sys::CLONE,
+    sys::VFORK,
 ];
 
 #[cfg(target_os = "linux")]
@@ -315,7 +333,9 @@ const RESTRICTED_SYSCALLS: &[i32] = &[
     sys::UNAME,
     sys::SYSINFO,
     sys::GETRANDOM,
-    sys::PRCTL,
+    sys::FORK,
+    sys::CLONE,
+    sys::VFORK,
     sys::READLINK,
     sys::READLINKAT,
     sys::MKDIR,
@@ -339,31 +359,48 @@ const RESTRICTED_SYSCALLS: &[i32] = &[
 
 #[allow(clippy::cast_sign_loss)]
 fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
-    let mut filters = Vec::with_capacity(allowed.len() + 3);
+    let mut filters = Vec::with_capacity(allowed.len() * 2 + 5);
 
-    // Load syscall number: A = seccomp_data.nr (offset 0)
-    // BPF_LD | BPF_W | BPF_ABS with k=0 loads the arch field
-    // Actually, for seccomp_data: offset 0 is nr (syscall number)
-    // The BPF_LD instruction loads into A (accumulator)
+    // 1. Validate architecture (prevent personality switch bypass on x86)
+    //    Load the architecture field from seccomp_data (offset 4).
+    //    If not x86_64, kill the process immediately.
     filters.push(sock_filter {
         code: BPF_LD | BPF_W | BPF_ABS,
         jt: 0,
         jf: 0,
-        k: 0, // offset 0 = syscall number
+        k: 4, // offset 4 = architecture field
+    });
+    // If NOT x86_64 -> KILL; if x86_64 -> skip KILL and continue
+    filters.push(sock_filter {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 1, // if equal (x86_64), skip 1 instruction (skip KILL)
+        jf: 0, // if NOT equal, execute next instruction (KILL)
+        k: AUDIT_ARCH_X86_64,
+    });
+    filters.push(sock_filter {
+        code: BPF_RET | BPF_K,
+        jt: 0,
+        jf: 0,
+        k: SECCOMP_RET_KILL_PROCESS,
     });
 
-    // For each allowed syscall, add a JEQ check
-    // Format: if A == sysno, jump to ALLOW (skip 0, so next instruction is ALLOW)
-    //         otherwise, continue to next check
+    // 2. Load syscall number: A = seccomp_data.nr (offset 0)
+    filters.push(sock_filter {
+        code: BPF_LD | BPF_W | BPF_ABS,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    });
+
+    // 3. For each allowed syscall, add a JEQ check
+    //    If A == sysno -> ALLOW; otherwise -> check next syscall
     for &sysno in allowed {
         filters.push(sock_filter {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 0, // if equal, skip 0 instructions → execute next (which is ALLOW)
-            jf: 0, // if not equal, skip 0 → continue to next check
+            jt: 0, // if equal, skip 0 -> execute ALLOW
+            jf: 1, // if NOT equal, skip 1 -> skip ALLOW, go to next check
             k: sysno as u32,
         });
-
-        // ALLOW: return SECCOMP_RET_ALLOW
         filters.push(sock_filter {
             code: BPF_RET | BPF_K,
             jt: 0,
@@ -372,44 +409,55 @@ fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
         });
     }
 
-    // Default: KILL
+    // 4. Default: kill the entire process (not just the thread)
     filters.push(sock_filter {
         code: BPF_RET | BPF_K,
         jt: 0,
         jf: 0,
-        k: SECCOMP_RET_KILL,
+        k: SECCOMP_RET_KILL_PROCESS,
     });
 
     filters
 }
 
+/// Build a seccomp filter for the given profile, or return `None` if the
+/// profile does not use seccomp (Open / Custom).
+///
+/// Called in the **parent** process where heap allocation is safe.
+fn build_seccomp_filter_for_profile(profile: Profile) -> Option<Vec<sock_filter>> {
+    match profile {
+        Profile::Hermetic => Some(build_seccomp_filter(HERMETIC_SYSCALLS)),
+        Profile::Restricted => Some(build_seccomp_filter(RESTRICTED_SYSCALLS)),
+        Profile::Open | Profile::Custom => None,
+    }
+}
+
+/// Apply a pre-built seccomp-BPF filter via `prctl`.
+///
+/// Must only be called in the child process after `fork()` (e.g. via `pre_exec`).
+/// **Async-signal-safe**: performs no heap allocation.
+///
+/// Automatically sets `PR_SET_NO_NEW_PRIVS` before installing the filter to
+/// prevent the child from gaining new privileges (setuid binaries) and to
+/// block installation of a more permissive seccomp filter.
 #[cfg(target_os = "linux")]
-#[allow(clippy::cast_possible_truncation)]
-fn apply_seccomp(profile: Profile) -> Result<(), std::io::Error> {
-    let allowed = match profile {
-        Profile::Hermetic => HERMETIC_SYSCALLS,
-        Profile::Restricted => RESTRICTED_SYSCALLS,
-        Profile::Open | Profile::Custom => return Ok(()),
-    };
-
-    let filters = build_seccomp_filter(allowed);
-
-    let prog = sock_fprog {
-        len: filters.len() as u16,
-        filter: filters.as_ptr(),
-    };
-
-    let ret = unsafe { libc::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const prog) };
-
+unsafe fn apply_seccomp_filter(filter: &[sock_filter]) -> Result<(), std::io::Error> {
+    // Prevent privilege escalation and further seccomp modifications.
+    let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if ret != 0 {
         return Err(std::io::Error::last_os_error());
     }
 
-    Ok(())
-}
+    let prog = sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
 
-#[cfg(not(target_os = "linux"))]
-fn apply_seccomp(_profile: Profile) -> Result<(), std::io::Error> {
+    let ret = libc::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const prog);
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
     Ok(())
 }
 
@@ -422,11 +470,61 @@ mod tests {
     #[test]
     fn test_build_filter_hermetic() {
         let filters = build_seccomp_filter(HERMETIC_SYSCALLS);
-        assert!(filters.len() > 3);
-        // First instruction should be LD
+        // Structure: arch LD (idx 0) + arch JEQ (idx 1) + arch KILL (idx 2)
+        //            + syscall LD (idx 3) + N*(JEQ + ALLOW) + final KILL
+        assert!(filters.len() > 6);
+        // First instruction should be LD for architecture (offset 4)
         assert_eq!(filters[0].code, BPF_LD | BPF_W | BPF_ABS);
-        // Last instruction should be RET KILL
+        assert_eq!(
+            filters[0].k, 4,
+            "first load should read arch field (offset 4)"
+        );
+        // Second instruction should be JEQ for arch comparison
+        assert_eq!(filters[1].code, BPF_JMP | BPF_JEQ | BPF_K);
+        assert_eq!(filters[1].k, AUDIT_ARCH_X86_64);
+        // Third instruction should be RET KILL for wrong arch
+        assert_eq!(filters[2].code, BPF_RET | BPF_K);
+        assert_eq!(filters[2].k, SECCOMP_RET_KILL_PROCESS);
+        // Fourth instruction should be LD for syscall number (offset 0)
+        assert_eq!(filters[3].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(
+            filters[3].k, 0,
+            "fourth load should read syscall nr (offset 0)"
+        );
+        // Last instruction should be RET KILL_PROCESS
         assert_eq!(filters.last().unwrap().code, BPF_RET | BPF_K);
-        assert_eq!(filters.last().unwrap().k, SECCOMP_RET_KILL);
+        assert_eq!(filters.last().unwrap().k, SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_filter_jf_not_zero() {
+        // Verify that the jf field is 1 (not 0), meaning non-matching
+        // syscalls correctly skip the ALLOW and fall through to the next check.
+        let filters = build_seccomp_filter(&[sys::WRITE]);
+        // Indices: 0=arch LD, 1=arch JEQ, 2=arch KILL, 3=syscall LD
+        //          4=JEQ for WRITE, 5=RET ALLOW, 6=RET KILL_PROCESS
+        assert_eq!(
+            filters[4].jt, 0,
+            "jt should be 0 (matched syscall -> ALLOW)"
+        );
+        assert_eq!(
+            filters[4].jf, 1,
+            "jf should be 1 (non-match -> skip ALLOW, go to next check)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_filter_for_profile_open_is_none() {
+        assert!(build_seccomp_filter_for_profile(Profile::Open).is_none());
+        assert!(build_seccomp_filter_for_profile(Profile::Custom).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_filter_for_profile_hermetic_is_some() {
+        assert!(build_seccomp_filter_for_profile(Profile::Hermetic).is_some());
+        assert!(build_seccomp_filter_for_profile(Profile::Restricted).is_some());
     }
 }
