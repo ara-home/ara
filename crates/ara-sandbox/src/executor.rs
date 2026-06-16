@@ -49,7 +49,7 @@ impl Executor {
         // Build the BPF filter in the parent process (heap allocation is
         // safe here).  The pre-built filter is passed as a reference to the
         // async-signal-safe pre_exec closure so the child only calls prctl().
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(filter) = build_seccomp_filter_for_profile(profile) {
             unsafe {
                 cmd.pre_exec(move || apply_seccomp_filter(&filter));
@@ -91,7 +91,7 @@ impl Executor {
         // Build the BPF filter in the parent process (heap allocation is
         // safe here).  The pre-built filter is passed as a reference to the
         // async-signal-safe pre_exec closure so the child only calls prctl().
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(filter) = build_seccomp_filter_for_profile(profile) {
             unsafe {
                 cmd.pre_exec(move || apply_seccomp_filter(&filter));
@@ -148,7 +148,7 @@ const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 
 // Audit architecture for x86_64 (used in seccomp arch validation)
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
 
 // seccomp constants
@@ -170,7 +170,7 @@ struct sock_fprog {
 }
 
 // Linux x86_64 syscall numbers
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod sys {
     pub const READ: i32 = 0;
     pub const WRITE: i32 = 1;
@@ -250,7 +250,7 @@ mod sys {
 }
 
 // Syscall whitelists per profile
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const HERMETIC_SYSCALLS: &[i32] = &[
     sys::READ,
     sys::WRITE,
@@ -278,7 +278,7 @@ const HERMETIC_SYSCALLS: &[i32] = &[
     sys::VFORK,
 ];
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const RESTRICTED_SYSCALLS: &[i32] = &[
     sys::READ,
     sys::WRITE,
@@ -357,6 +357,7 @@ const RESTRICTED_SYSCALLS: &[i32] = &[
     sys::PERSONALITY,
 ];
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[allow(clippy::cast_sign_loss)]
 fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
     let mut filters = Vec::with_capacity(allowed.len() * 2 + 5);
@@ -424,12 +425,19 @@ fn build_seccomp_filter(allowed: &[i32]) -> Vec<sock_filter> {
 /// profile does not use seccomp (Open / Custom).
 ///
 /// Called in the **parent** process where heap allocation is safe.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn build_seccomp_filter_for_profile(profile: Profile) -> Option<Vec<sock_filter>> {
     match profile {
         Profile::Hermetic => Some(build_seccomp_filter(HERMETIC_SYSCALLS)),
         Profile::Restricted => Some(build_seccomp_filter(RESTRICTED_SYSCALLS)),
         Profile::Open | Profile::Custom => None,
     }
+}
+
+/// Stub for non-Linux or non-x86_64 platforms: seccomp is not available.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn build_seccomp_filter_for_profile(_profile: Profile) -> Option<Vec<sock_filter>> {
+    None
 }
 
 /// Apply a pre-built seccomp-BPF filter via `prctl`.
@@ -440,7 +448,7 @@ fn build_seccomp_filter_for_profile(profile: Profile) -> Option<Vec<sock_filter>
 /// Automatically sets `PR_SET_NO_NEW_PRIVS` before installing the filter to
 /// prevent the child from gaining new privileges (setuid binaries) and to
 /// block installation of a more permissive seccomp filter.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 unsafe fn apply_seccomp_filter(filter: &[sock_filter]) -> Result<(), std::io::Error> {
     // Prevent privilege escalation and further seccomp modifications.
     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
@@ -466,7 +474,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn test_build_filter_hermetic() {
         let filters = build_seccomp_filter(HERMETIC_SYSCALLS);
@@ -496,7 +504,7 @@ mod tests {
         assert_eq!(filters.last().unwrap().k, SECCOMP_RET_KILL_PROCESS);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn test_build_filter_jf_not_zero() {
         // Verify that the jf field is 1 (not 0), meaning non-matching
@@ -514,14 +522,14 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn test_build_filter_for_profile_open_is_none() {
         assert!(build_seccomp_filter_for_profile(Profile::Open).is_none());
         assert!(build_seccomp_filter_for_profile(Profile::Custom).is_none());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn test_build_filter_for_profile_hermetic_is_some() {
         assert!(build_seccomp_filter_for_profile(Profile::Hermetic).is_some());
