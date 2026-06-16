@@ -609,6 +609,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_extract_tarball_rejects_parent_symlink_escape() {
         // Pre-existing parent symlink pointing outside dest.
@@ -619,7 +620,6 @@ mod tests {
         std::fs::create_dir(&outside_dir).unwrap();
 
         std::fs::create_dir_all(&dest).unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&outside_dir, dest.join("safe_dir")).unwrap();
 
         let mut buf = Vec::new();
