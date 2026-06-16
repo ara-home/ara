@@ -108,6 +108,21 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
         }
 
         let target = dest.join(stripped);
+
+        // If the target leaf is an existing symlink (e.g. from a prior tarball
+        // entry or a previous installation), remove it first. This both prevents
+        // tar::Entry::unpack from following the symlink and allows the subsequent
+        // path traversal check to see the clean path without symlink redirection.
+        if target.parent().is_some_and(|p| p.exists()) {
+            if let Ok(meta) = target.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    std::fs::remove_file(&target).with_context(|| {
+                        format!("failed to remove symlink at {}", target.display())
+                    })?;
+                }
+            }
+        }
+
         if target_escapes_dest(&target, &canonical_dest) {
             anyhow::bail!("path traversal detected in tarball: {}", stripped.display());
         }
@@ -132,6 +147,25 @@ pub fn extract_tarball(tarball: &[u8], dest: &Path) -> Result<()> {
 
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
+
+            // Re-verify parent integrity: create_dir_all follows symlinks,
+            // so a parent symlink pointing outside dest would redirect the
+            // unpack even if the leaf was cleaned above.
+            let resolved_parent = parent
+                .canonicalize()
+                .with_context(|| format!("failed to resolve parent of {}", target.display()))?;
+            if !resolved_parent.starts_with(&canonical_dest) {
+                anyhow::bail!("parent path escapes destination: {}", parent.display(),);
+            }
+        }
+
+        // Safeguard: re-check the leaf in case a symlink was created between
+        // our first check and now (TOCTOU race from concurrent process).
+        if let Ok(meta) = target.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                std::fs::remove_file(&target)
+                    .with_context(|| format!("failed to remove symlink at {}", target.display()))?;
+            }
         }
 
         entry.unpack(&target).context("failed to unpack entry")?;
@@ -508,6 +542,81 @@ mod tests {
         extract_tarball(&buf, &dest).unwrap();
         let content = std::fs::read_to_string(dest.join("my_link")).unwrap();
         assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_extract_tarball_overwrites_existing_symlink() {
+        // Pre-existing symlink at the target path pointing outside dest.
+        // Extraction must remove the symlink and create a real file instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, b"secret").unwrap();
+
+        std::fs::create_dir_all(&dest).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, dest.join("link")).unwrap();
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("link").unwrap();
+        header.set_size(5);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"hello" as &[u8]).unwrap();
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        extract_tarball(&buf, &dest).unwrap();
+        // File must be at dest/link, NOT at outside
+        let content = std::fs::read_to_string(dest.join("link")).unwrap();
+        assert_eq!(content, "hello");
+        // The outside file must remain unchanged
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_extract_tarball_rejects_parent_symlink_escape() {
+        // Pre-existing parent symlink pointing outside dest.
+        // Extraction must reject because the parent redirects outside.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+
+        std::fs::create_dir_all(&dest).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_dir, dest.join("safe_dir")).unwrap();
+
+        let mut buf = Vec::new();
+        let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::fast());
+        let mut ar = tar::Builder::new(encoder);
+
+        // Dummy to break common prefix detection
+        let mut header = tar::Header::new_gnu();
+        header.set_path("dummy").unwrap();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"data" as &[u8]).unwrap();
+
+        // File at safe_dir/evil.txt — safe_dir → outside_dir, so this escapes
+        let mut header = tar::Header::new_gnu();
+        header.set_path("safe_dir/evil.txt").unwrap();
+        header.set_size(12);
+        header.set_mode(0o644);
+        header.set_cksum();
+        ar.append(&header, b"evil content\n" as &[u8]).unwrap();
+        let encoder = ar.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let result = extract_tarball(&buf, &dest);
+        assert!(
+            result.is_err(),
+            "should reject write through parent symlink escape"
+        );
     }
 
     #[test]
