@@ -7,7 +7,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ara_sandbox::executor::Executor;
 use ara_sandbox::profiles::{Profile, SandboxConfig};
 
-pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
+fn default_x_profile() -> Profile {
+    #[cfg(target_os = "linux")]
+    {
+        Profile::Restricted
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Profile::Open
+    }
+}
+
+pub(crate) async fn cmd_x(package: &str, args: &[String], profile: Option<&str>) -> Result<()> {
+    // Validate profile early — before any side effects (install, fs writes).
+    let profile = match profile {
+        Some(p) => p
+            .parse::<Profile>()
+            .map_err(|e| anyhow::anyhow!("invalid profile: {e}"))?,
+        None => default_x_profile(),
+    };
+
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -85,7 +104,7 @@ pub(crate) async fn cmd_x(package: &str, args: &[String]) -> Result<()> {
         format!("{}:{}", canonical.display(), current_path),
     );
 
-    let config = SandboxConfig::for_profile(Profile::Open);
+    let config = SandboxConfig::for_profile(profile);
     let executor = Executor::new(config);
 
     let exec_res = executor.execute_program(&bin_path, args, Some(env));

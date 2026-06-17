@@ -99,6 +99,10 @@ pub enum Commands {
         /// Arguments to pass to the package
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Sandbox profile (open, restricted, hermetic).
+        /// Default: restricted on Linux, open on other platforms.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Run a script in a sandboxed environment
     Run {
@@ -209,7 +213,11 @@ impl Cli {
                 )
                 .await
             }
-            Commands::X { package, args } => x::cmd_x(package, args).await,
+            Commands::X {
+                package,
+                args,
+                profile,
+            } => x::cmd_x(package, args, profile.as_deref()).await,
             Commands::Run { script, profile } => run::cmd_run(script, profile),
             Commands::Analyze { path } => analyze::cmd_analyze(path),
             Commands::Audit { path } => analyze::cmd_audit(path),
