@@ -1,4 +1,18 @@
 
+## [unreleased]
+
+### 🚀 Features
+
+- *(cli)* Add --profile flag to ara x with OS-aware default (#66)
+
+### 🐛 Bug Fixes
+
+- *(cli)* Resolve symlink-based TOCTOU in tarball extraction (#64)
+- *(cli)* Prevent tar unpack from following symlinks (#65)
+
+### 📚 Documentation
+
+- Update CHANGELOG.md (#62)
 ## [0.13.1] - 2026-06-16
 
 ### 💼 Other
