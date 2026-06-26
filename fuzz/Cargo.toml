@@ -1,0 +1,55 @@
+[package]
+name = "ara-fuzz"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+
+[dependencies.ara-manifest]
+path = "../crates/ara-manifest"
+
+[dependencies.ara-lockfile]
+path = "../crates/ara-lockfile"
+
+[dependencies.ara-source]
+path = "../crates/ara-source"
+
+[dependencies.ara-types]
+path = "../crates/ara-types"
+
+[dependencies.ara-analysis]
+path = "../crates/ara-analysis"
+
+# Prevent this from being built normally
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "manifest_parser"
+path = "fuzz_targets/manifest_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lockfile_parser"
+path = "fuzz_targets/lockfile_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "install_spec"
+path = "fuzz_targets/install_spec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false

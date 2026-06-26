@@ -114,6 +114,32 @@ impl GitSource {
             if !checkout.success() {
                 return Err(SourceError::GitError("git checkout ref failed".to_string()));
             }
+
+            // Verify the checked-out commit matches the expected SHA
+            if ref_str != "HEAD"
+                && ref_str.len() == 40
+                && ref_str.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                let rev_parse = Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&tmp_path)
+                    .output()
+                    .map_err(|e| SourceError::GitError(format!("failed to verify commit: {e}")))?;
+                if !rev_parse.status.success() {
+                    return Err(SourceError::GitError(
+                        "git rev-parse HEAD failed during commit verification".to_string(),
+                    ));
+                }
+                let actual_commit = String::from_utf8_lossy(&rev_parse.stdout)
+                    .trim()
+                    .to_string();
+                if actual_commit != ref_str {
+                    return Err(SourceError::GitError(format!(
+                        "commit mismatch for {}: expected {ref_str}, got {actual_commit}",
+                        self.url,
+                    )));
+                }
+            }
         }
 
         let output = Command::new("tar")

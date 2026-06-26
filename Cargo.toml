@@ -11,6 +11,7 @@ members = [
     "crates/ara-resolver",
     "crates/ara-sandbox",
     "crates/ara-cli",
+    "fuzz",
 ]
 
 [workspace.package]
