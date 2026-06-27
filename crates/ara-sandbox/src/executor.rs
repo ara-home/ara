@@ -583,16 +583,18 @@ mod tests {
 
         let config = SandboxConfig::for_profile(Profile::Restricted);
         let executor = Executor::new(config);
+
+        // Use env-dependent command to verify env propagation
         let result = executor.execute(
-            "echo ok",
-            Some(HashMap::from([(
-                "PATH".to_string(),
-                "/bin:/usr/bin".to_string(),
-            )])),
+            r#"test "$ARA_SANDBOX_ENV" = "ok""#,
+            Some(HashMap::from([
+                ("PATH".to_string(), "/bin:/usr/bin".to_string()),
+                ("ARA_SANDBOX_ENV".to_string(), "ok".to_string()),
+            ])),
         );
         assert!(
             result.is_ok(),
-            "restricted profile should allow basic execution: {result:?}"
+            "restricted profile should allow basic execution with env: {result:?}"
         );
     }
 

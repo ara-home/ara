@@ -11,25 +11,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 
-[dependencies.ara-manifest]
-path = "../crates/ara-manifest"
-
-[dependencies.ara-lockfile]
-path = "../crates/ara-lockfile"
-
-[dependencies.ara-source]
-path = "../crates/ara-source"
-
-[dependencies.ara-types]
-path = "../crates/ara-types"
-
-[dependencies.ara-analysis]
-path = "../crates/ara-analysis"
-
-# Prevent this from being built normally
-[profile.release]
-debug = 1
-
 [[bin]]
 name = "manifest_parser"
 path = "fuzz_targets/manifest_parser.rs"

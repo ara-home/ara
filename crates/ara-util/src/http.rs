@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 100;
+const MAX_RETRY_AFTER_SECS: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -69,7 +70,8 @@ impl HttpClient {
 
     fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
         let value = resp.headers().get("retry-after")?.to_str().ok()?;
-        value.parse::<u64>().ok().map(Duration::from_secs)
+        let secs = value.parse::<u64>().ok()?;
+        Some(Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
     }
 
     pub async fn get(&self, url: &str) -> Result<Vec<u8>, HttpError> {

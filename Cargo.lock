@@ -159,11 +159,6 @@ dependencies = [
 name = "ara-fuzz"
 version = "0.13.1"
 dependencies = [
- "ara-analysis",
- "ara-lockfile",
- "ara-manifest",
- "ara-source",
- "ara-types",
  "libfuzzer-sys",
  "tempfile",
 ]
