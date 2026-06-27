@@ -616,10 +616,23 @@ mod tests {
     fn test_execute_under_hermetic_succeeds() {
         use std::collections::HashMap;
         use std::path::Path;
+        use std::process::Command;
 
-        // Probe for a known statically-linked binary (busybox) in common locations
+        // Probe for a statically-linked binary. Busybox is ideal but on some
+        // CI images it is dynamically linked or absent. We verify with `ldd`.
         let candidates = ["/usr/bin/busybox", "/bin/busybox"];
-        let static_bin = candidates.iter().find(|p| Path::new(p).exists());
+        let static_bin = candidates.iter().find(|p| {
+            Path::new(p).exists()
+                && Command::new("file")
+                    .arg(p)
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        let out = String::from_utf8_lossy(&o.stdout);
+                        Some(out.contains("statically linked"))
+                    })
+                    .unwrap_or(false)
+        });
         let Some(bin_path) = static_bin else {
             eprintln!("  warning: skipping hermetic test — no static binary found");
             return;
