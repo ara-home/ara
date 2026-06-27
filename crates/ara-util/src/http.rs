@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 100;
+const MAX_RETRY_AFTER_SECS: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -41,6 +42,7 @@ fn shared_client() -> Result<reqwest::Client, HttpError> {
         .tcp_keepalive(Duration::from_secs(60))
         .http2_initial_stream_window_size(Some(1_048_576)) // 1 MB per stream
         .http2_initial_connection_window_size(Some(67_108_864)) // 64 MB total
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
     let _ = CLIENT.set(client.clone());
@@ -62,8 +64,14 @@ impl HttpClient {
     fn should_retry(status: Option<reqwest::StatusCode>) -> bool {
         match status {
             None => true,
-            Some(s) => s.is_server_error(),
+            Some(s) => s.is_server_error() || s == reqwest::StatusCode::TOO_MANY_REQUESTS,
         }
+    }
+
+    fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
+        let value = resp.headers().get("retry-after")?.to_str().ok()?;
+        let secs = value.parse::<u64>().ok()?;
+        Some(Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
     }
 
     pub async fn get(&self, url: &str) -> Result<Vec<u8>, HttpError> {
@@ -97,6 +105,13 @@ impl HttpClient {
                             }
                         }
                     }
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        if let Some(delay) = Self::parse_retry_after(&resp) {
+                            tokio::time::sleep(delay).await;
+                            last_error = Some(HttpError::StatusNotOk(status));
+                            continue;
+                        }
+                    }
                     if !Self::should_retry(Some(status)) {
                         return Err(HttpError::StatusNotOk(status));
                     }
@@ -125,6 +140,35 @@ mod tests {
         let client = HttpClient::new().unwrap();
         // Just verify it doesn't crash — timeout isn't publicly accessible
         let _ = client;
+    }
+
+    #[tokio::test]
+    async fn test_http_client_get_with_retry_after_429() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        // First call: 429 with Retry-After, second call: 200
+        let mock_429 = server
+            .mock("GET", "/rate-limited")
+            .with_status(429)
+            .with_header("retry-after", "0")
+            .with_body("rate limited")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let mock_200 = server
+            .mock("GET", "/rate-limited")
+            .with_status(200)
+            .with_body("success")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let client = HttpClient::new().unwrap();
+        let body = client.get(&format!("{url}/rate-limited")).await.unwrap();
+        assert_eq!(body, b"success");
+        mock_429.assert();
+        mock_200.assert();
     }
 
     #[tokio::test]

@@ -54,8 +54,25 @@ pub(crate) fn write_lockfile(
     };
     let lock_content = ara_lockfile::generator::generate(&lockfile);
     let lock_path = cwd.join("ara.lock");
-    let mut lock_f = std::fs::File::create(&lock_path)?;
-    lock_f.write_all(lock_content.as_bytes())?;
+
+    // Atomic write: write to temp file, then rename
+    let tmp_path = cwd.join(format!("ara.lock.tmp.{}", uuid::Uuid::new_v4()));
+    let mut tmp_f = std::fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create temp lockfile at {}", tmp_path.display()))?;
+    tmp_f
+        .write_all(lock_content.as_bytes())
+        .with_context(|| format!("failed to write temp lockfile at {}", tmp_path.display()))?;
+    tmp_f
+        .sync_all()
+        .with_context(|| format!("failed to sync temp lockfile at {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &lock_path).with_context(|| {
+        format!(
+            "failed to rename temp lockfile from {} to {}",
+            tmp_path.display(),
+            lock_path.display()
+        )
+    })?;
+
     println!("Lockfile written to ara.lock");
     Ok(())
 }

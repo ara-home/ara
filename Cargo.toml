@@ -11,6 +11,19 @@ members = [
     "crates/ara-resolver",
     "crates/ara-sandbox",
     "crates/ara-cli",
+    "fuzz",
+]
+default-members = [
+    "crates/ara-types",
+    "crates/ara-util",
+    "crates/ara-store",
+    "crates/ara-source",
+    "crates/ara-analysis",
+    "crates/ara-manifest",
+    "crates/ara-lockfile",
+    "crates/ara-resolver",
+    "crates/ara-sandbox",
+    "crates/ara-cli",
 ]
 
 [workspace.package]
@@ -56,6 +69,9 @@ ara-lockfile = { path = "crates/ara-lockfile" }
 ara-resolver = { path = "crates/ara-resolver" }
 ara-sandbox = { path = "crates/ara-sandbox" }
 ara-cli = { path = "crates/ara-cli" }
+
+[profile.release]
+debug = 1
 
 [profile.dist]
 inherits = "release"

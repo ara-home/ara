@@ -247,6 +247,16 @@ mod sys {
     pub const CLONE: i32 = 56;
     pub const FORK: i32 = 57;
     pub const VFORK: i32 = 58;
+    pub const EXECVE: i32 = 59;
+    pub const EXECVEAT: i32 = 322;
+    pub const ARCH_PRCTL: i32 = 158;
+    pub const SET_TID_ADDRESS: i32 = 218;
+    pub const SET_ROBUST_LIST: i32 = 273;
+    pub const PRLIMIT64: i32 = 302;
+    pub const RSEQ: i32 = 334;
+    pub const PRCTL: i32 = 157;
+    pub const SETUID: i32 = 105;
+    pub const SETGID: i32 = 106;
 }
 
 // Syscall whitelists per profile
@@ -276,6 +286,26 @@ const HERMETIC_SYSCALLS: &[i32] = &[
     sys::FORK,
     sys::CLONE,
     sys::VFORK,
+    sys::EXECVE,
+    sys::EXECVEAT,
+    sys::ARCH_PRCTL,
+    sys::SET_TID_ADDRESS,
+    sys::SET_ROBUST_LIST,
+    sys::PRLIMIT64,
+    sys::RSEQ,
+    sys::OPENAT,
+    sys::ACCESS,
+    sys::PREAD64,
+    sys::GETPID,
+    sys::GETPPID,
+    sys::GETUID,
+    sys::GETEUID,
+    sys::GETGID,
+    sys::GETEGID,
+    sys::PRCTL,
+    sys::READLINKAT,
+    sys::SETUID,
+    sys::SETGID,
 ];
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -336,6 +366,16 @@ const RESTRICTED_SYSCALLS: &[i32] = &[
     sys::FORK,
     sys::CLONE,
     sys::VFORK,
+    sys::EXECVE,
+    sys::EXECVEAT,
+    sys::ARCH_PRCTL,
+    sys::SET_TID_ADDRESS,
+    sys::SET_ROBUST_LIST,
+    sys::PRLIMIT64,
+    sys::RSEQ,
+    sys::PRCTL,
+    sys::SETUID,
+    sys::SETGID,
     sys::READLINK,
     sys::READLINKAT,
     sys::MKDIR,
@@ -534,5 +574,84 @@ mod tests {
     fn test_build_filter_for_profile_hermetic_is_some() {
         assert!(build_seccomp_filter_for_profile(Profile::Hermetic).is_some());
         assert!(build_seccomp_filter_for_profile(Profile::Restricted).is_some());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn test_execute_under_restricted_succeeds() {
+        use std::collections::HashMap;
+
+        let config = SandboxConfig::for_profile(Profile::Restricted);
+        let executor = Executor::new(config);
+
+        // Use env-dependent command to verify env propagation
+        let result = executor.execute(
+            r#"test "$ARA_SANDBOX_ENV" = "ok""#,
+            Some(HashMap::from([
+                ("PATH".to_string(), "/bin:/usr/bin".to_string()),
+                ("ARA_SANDBOX_ENV".to_string(), "ok".to_string()),
+            ])),
+        );
+        assert!(
+            result.is_ok(),
+            "restricted profile should allow basic execution with env: {result:?}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn test_execute_program_under_restricted_succeeds() {
+        let config = SandboxConfig::for_profile(Profile::Restricted);
+        let executor = Executor::new(config);
+        let result =
+            executor.execute_program(std::path::Path::new("/bin/echo"), &["ok".to_string()], None);
+        assert!(
+            result.is_ok(),
+            "restricted profile should allow program execution: {result:?}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn test_execute_under_hermetic_succeeds() {
+        use std::collections::HashMap;
+        use std::path::Path;
+        use std::process::Command;
+
+        // Probe for a statically-linked binary. Busybox is ideal but on some
+        // CI images it is dynamically linked or absent. We verify with `ldd`.
+        let candidates = ["/usr/bin/busybox", "/bin/busybox"];
+        let static_bin = candidates.iter().find(|p| {
+            Path::new(p).exists()
+                && Command::new("file")
+                    .arg(p)
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        let out = String::from_utf8_lossy(&o.stdout);
+                        Some(out.contains("statically linked"))
+                    })
+                    .unwrap_or(false)
+        });
+        let Some(bin_path) = static_bin else {
+            eprintln!("  warning: skipping hermetic test — no static binary found");
+            return;
+        };
+
+        let config = SandboxConfig::for_profile(Profile::Hermetic);
+        let executor = Executor::new(config);
+
+        let result = executor.execute_program(
+            Path::new(bin_path),
+            &["echo".to_string(), "ok".to_string()],
+            Some(HashMap::from([(
+                "PATH".to_string(),
+                "/usr/bin:/bin".to_string(),
+            )])),
+        );
+        assert!(
+            result.is_ok(),
+            "hermetic profile should execute static binaries: {result:?}"
+        );
     }
 }

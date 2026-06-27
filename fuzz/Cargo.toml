@@ -1,0 +1,36 @@
+[package]
+name = "ara-fuzz"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+
+[[bin]]
+name = "manifest_parser"
+path = "fuzz_targets/manifest_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lockfile_parser"
+path = "fuzz_targets/lockfile_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "install_spec"
+path = "fuzz_targets/install_spec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
